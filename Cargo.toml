@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["core/coordination"]
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+
+[workspace.dependencies]
+es-entity = { version = "0.11.11", features = [
+    "event-context",
+    "tracing-context",
+    "instrument",
+] }
+bitcoin = { version = "0.32", features = ["serde", "base64"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+chrono = { version = "0.4.43", features = ["clock", "serde"] }
+thiserror = "2.0.18"
+derive_builder = "0.20.0"
+uuid = { version = "1.23", features = ["serde", "v4"] }
+strum = { version = "0.28", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+] }
+sha2 = "0.10"
+tracing = "0.1.44"
