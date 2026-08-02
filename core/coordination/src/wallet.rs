@@ -16,7 +16,7 @@ use bitcoin::{
 };
 use miniscript::ForEachKey;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
-use miniscript::psbt::{PsbtExt, PsbtInputExt};
+use miniscript::psbt::PsbtExt;
 
 use crate::psbt_session::{OutPointRef, SpendSpec};
 
@@ -42,6 +42,8 @@ pub enum WalletError {
     Psbt(String),
     #[error("WalletError - OutputUpdate: {0}")]
     OutputUpdate(#[from] miniscript::psbt::OutputUpdateError),
+    #[error("WalletError - UtxoUpdate: {0}")]
+    UtxoUpdate(#[from] miniscript::psbt::UtxoUpdateError),
 }
 
 /// A wallet-owned coin being spent: the outpoint, its full `TxOut`
@@ -163,7 +165,11 @@ pub fn build_unsigned_psbt(
 
     for (idx, derived) in derived_descriptors.iter().enumerate() {
         psbt.inputs[idx].witness_utxo = Some(witness_utxos[idx].clone());
-        psbt.inputs[idx].update_with_descriptor_unchecked(derived)?;
+        // Checked update: errors unless the funding UTXO's script_pubkey
+        // matches the descriptor at the claimed derivation index — a wrong
+        // index or mismatched funding row is a validation error here, not
+        // an inconsistent PSBT discovered later on a signing device.
+        psbt.update_input_with_descriptor(idx, derived)?;
     }
 
     // Fill the change output's map with `witness_script` and

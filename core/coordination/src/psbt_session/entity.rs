@@ -203,7 +203,10 @@ impl PsbtSession {
     ///
     /// The use-case layer MUST run `crate::psbt::validate_signed_submission`
     /// against the blob at `signed_psbt_hash` before calling this; the entity
-    /// only enforces policy membership and lifecycle state.
+    /// only enforces policy membership and lifecycle state. That validation
+    /// also enforces completeness (every input signed) — the first upload per
+    /// fingerprint is final, so a partially-signed PSBT must never be
+    /// accepted.
     ///
     /// Idempotent per signer: re-uploading after a crash/retry is a no-op.
     pub fn add_signature(

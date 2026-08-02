@@ -3,7 +3,10 @@
 //! This is the security-critical code path of the signing flow. Signers
 //! return a full PSBT document (BIP-174 is a *mergeable* format); before the
 //! platform appends a `SignatureAdded` event it must prove the submission is
-//! the original unsigned PSBT plus *only* additive partial signatures.
+//! the original unsigned PSBT plus *only* additive partial signatures, and
+//! that the submission is complete (every input signed): `add_signature` is
+//! idempotent per fingerprint, so accepting a partial first upload would
+//! permanently brick a multi-input session.
 //!
 //! Anything a signer's software changed beyond that — modified outputs,
 //! stripped cosigner signatures, altered scripts — is rejected here, at the
@@ -23,13 +26,24 @@ pub enum PsbtValidationError {
     PartialSignatureRemoved(usize),
     #[error("submission adds no new partial signatures")]
     NoNewSignatures,
+    #[error(
+        "submission adds no partial signature for input {0}; a signer must sign every input \
+         (accepting a partial submission would brick the session: add_signature is idempotent \
+         per fingerprint, so the first upload is final)"
+    )]
+    IncompleteSubmission(usize),
 }
 
 pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
     Psbt::deserialize(bytes).map_err(|e| PsbtValidationError::Deserialize(e.to_string()))
 }
 
-/// Verify that `signed` is `original` plus only additive partial signatures.
+/// Verify that `signed` is `original` plus only additive partial signatures,
+/// and that the submission is *complete*: every input must gain at least one
+/// new partial signature. A signer signs the whole transaction (standard
+/// SIGHASH_ALL behavior); allowing a partially-signed upload would brick the
+/// session, because `add_signature` is idempotent per fingerprint and the
+/// first upload sticks.
 ///
 /// Returns the number of new partial signatures added across all inputs.
 ///
@@ -53,6 +67,7 @@ pub fn validate_signed_submission(
     }
 
     let mut added = 0usize;
+    let mut all_inputs_signed = true;
     for (idx, (orig_in, signed_in)) in original.inputs.iter().zip(signed.inputs.iter()).enumerate()
     {
         for (pk, sig) in &orig_in.partial_sigs {
@@ -61,11 +76,26 @@ pub fn validate_signed_submission(
                 _ => return Err(PsbtValidationError::PartialSignatureRemoved(idx)),
             }
         }
-        added += signed_in.partial_sigs.len() - orig_in.partial_sigs.len();
+        let added_here = signed_in.partial_sigs.len() - orig_in.partial_sigs.len();
+        if added_here == 0 {
+            all_inputs_signed = false;
+        }
+        added += added_here;
     }
 
     if added == 0 {
         return Err(PsbtValidationError::NoNewSignatures);
+    }
+    if !all_inputs_signed {
+        let idx = original
+            .inputs
+            .iter()
+            .zip(signed.inputs.iter())
+            .position(|(orig_in, signed_in)| {
+                signed_in.partial_sigs.len() == orig_in.partial_sigs.len()
+            })
+            .expect("all_inputs_signed is false, so some input gained no signature");
+        return Err(PsbtValidationError::IncompleteSubmission(idx));
     }
     Ok(added)
 }

@@ -357,3 +357,81 @@ async fn removed_cosigner_signature_is_rejected() {
         Err(core_coordination::psbt::PsbtValidationError::PartialSignatureRemoved(0))
     ));
 }
+
+#[tokio::test]
+async fn mismatched_funding_script_is_rejected() {
+    let fixture = Fixture::new();
+
+    // the funding row claims derivation index 0 but carries the script
+    // of index 9 — the coordinator must catch the lie, not emit an
+    // inconsistent PSBT for signers to discover
+    let mut funding = fixture.funding.clone();
+    funding[0].txout.script_pubkey = fixture
+        .descriptor
+        .at_derivation_index(9)
+        .unwrap()
+        .script_pubkey();
+
+    assert!(matches!(
+        build_unsigned_psbt(&fixture.spec, &fixture.descriptor, &funding, NETWORK),
+        Err(core_coordination::wallet::WalletError::UtxoUpdate(_))
+    ));
+}
+
+#[tokio::test]
+async fn partial_multi_input_submission_is_rejected() {
+    let (secp, xpriv, descriptor, _) = setup_wallet();
+
+    // two wallet UTXOs, at derivation indices 0 and 2
+    let mk_funding = |seed: u8, index: u32, sats: u64| FundingUtxo {
+        outpoint: OutPointRef {
+            txid: bitcoin::Txid::from_byte_array([seed; 32]),
+            vout: 0,
+        },
+        txout: TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: descriptor
+                .at_derivation_index(index)
+                .unwrap()
+                .script_pubkey(),
+        },
+        derivation_index: index,
+    };
+    let funding = vec![mk_funding(7, 0, 60_000), mk_funding(8, 2, 60_000)];
+
+    let destination = descriptor.at_derivation_index(5).unwrap().script_pubkey();
+    let spec = SpendSpec {
+        inputs: funding.iter().map(|f| f.outpoint.clone()).collect(),
+        outputs: vec![SpendOutput {
+            address: bitcoin::Address::from_script(&destination, NETWORK)
+                .unwrap()
+                .to_string(),
+            amount_sats: 50_000,
+        }],
+        fee_sats: 500,
+        change_output: Some(ChangeOutput {
+            amount_sats: 69_500,
+            derivation_index: 1,
+        }),
+    };
+
+    let unsigned = build_unsigned_psbt(&spec, &descriptor, &funding, NETWORK).unwrap();
+
+    // a complete submission — one new signature per input — is accepted
+    let mut complete = unsigned.clone();
+    complete
+        .sign(&xpriv, &secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+    assert_eq!(validate_signed_submission(&unsigned, &complete).unwrap(), 2);
+
+    // a submission that signs only input 0 must be rejected: with
+    // per-fingerprint idempotency the first upload sticks, so accepting
+    // it would let a signer brick the session
+    let mut partial = unsigned.clone();
+    partial.inputs[0].partial_sigs = complete.inputs[0].partial_sigs.clone();
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &partial),
+        Err(core_coordination::psbt::PsbtValidationError::IncompleteSubmission(1))
+    ));
+}
