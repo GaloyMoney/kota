@@ -35,7 +35,7 @@ pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
 ///
 /// TODO(security): bind the *new* partial signatures to the submitting
 /// signer's fingerprint via `bip32_derivation` key sources, so a signer
-/// cannot smuggle in signatures for other quorum members' keys.
+/// cannot smuggle in signatures for other wallet members' keys.
 /// TODO(security): also assert immutability of the non-signature fields we
 /// care about (sighash types, redeem/witness scripts, proprietary keys) —
 /// partial_sigs are not the only mutable-looking field in a PSBT.

@@ -3,8 +3,7 @@ use sha2::Digest;
 
 es_entity::entity_id! {
     PsbtSessionId,
-    VaultId,
-    ProposalId;
+    WalletId;
 }
 
 /// Content hash (SHA-256) of a serialized PSBT or final transaction blob.

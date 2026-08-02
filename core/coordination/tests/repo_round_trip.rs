@@ -3,7 +3,7 @@
 
 use core_coordination::{
     primitives::*,
-    psbt_session::{NewPsbtSession, PsbtSessionRepo, PsbtSessionStatus, QuorumConfig},
+    psbt_session::{NewPsbtSession, Policy, PsbtSessionRepo, PsbtSessionStatus},
 };
 
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
@@ -26,15 +26,15 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
 
     let new_session = NewPsbtSession::try_new(
         PsbtSessionId::new(),
-        VaultId::new(),
-        ProposalId::new(),
+        WalletId::new(),
+        fp(1),
         BlobRef::new("psbt/unsigned/1"),
         PsbtHash::digest_of(b"unsigned-psbt"),
-        QuorumConfig {
+        Policy {
             threshold: 2,
-            eligible_signers: vec![fp(1), fp(2), fp(3)],
-            expires_at: DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            keystores: vec![fp(1), fp(2), fp(3)],
         },
+        DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
     )?;
 
     let mut session = repo.create(new_session).await?;

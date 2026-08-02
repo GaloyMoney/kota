@@ -6,7 +6,7 @@ use es_entity::*;
 use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
 use chrono::{DateTime, Utc};
 
-use crate::primitives::{BlobRef, ProposalId, PsbtHash, PsbtSessionId, VaultId};
+use crate::primitives::{BlobRef, PsbtHash, PsbtSessionId, WalletId};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
@@ -19,12 +19,15 @@ use super::primitives::{
 pub enum PsbtSessionEvent {
     Initialized {
         id: PsbtSessionId,
-        vault_id: VaultId,
-        proposal_id: ProposalId,
+        wallet_id: WalletId,
+        /// Keystore fingerprint of the wallet member who proposed this
+        /// spend. Anyone in the wallet can propose; proposers and
+        /// signers are the same set of people (1-1 user/keystore).
+        proposed_by: KeyFingerprint,
         unsigned_psbt_ref: BlobRef,
         unsigned_psbt_hash: PsbtHash,
         threshold: u32,
-        eligible_signers: Vec<KeyFingerprint>,
+        keystores: Vec<KeyFingerprint>,
         expires_at: DateTime<Utc>,
     },
     /// A signer submitted a signed PSBT that passed additive-only
@@ -68,12 +71,12 @@ pub enum PsbtSessionEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct PsbtSession {
     pub id: PsbtSessionId,
-    pub vault_id: VaultId,
-    pub proposal_id: ProposalId,
+    pub wallet_id: WalletId,
+    pub proposed_by: KeyFingerprint,
     pub unsigned_psbt_ref: BlobRef,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
-    eligible_signers: Vec<KeyFingerprint>,
+    keystores: Vec<KeyFingerprint>,
     expires_at: DateTime<Utc>,
     signatures: Vec<SignatureRecord>,
     #[builder(setter(strip_option), default)]
@@ -108,8 +111,8 @@ impl PsbtSession {
         self.threshold
     }
 
-    pub fn eligible_signers(&self) -> &[KeyFingerprint] {
-        &self.eligible_signers
+    pub fn keystores(&self) -> &[KeyFingerprint] {
+        &self.keystores
     }
 
     pub fn expires_at(&self) -> DateTime<Utc> {
@@ -128,8 +131,8 @@ impl PsbtSession {
         self.signatures.len() >= self.threshold as usize
     }
 
-    pub fn missing_signers(&self) -> Vec<KeyFingerprint> {
-        self.eligible_signers
+    pub fn missing_keystores(&self) -> Vec<KeyFingerprint> {
+        self.keystores
             .iter()
             .filter(|fp| !self.has_signed(fp))
             .copied()
@@ -154,7 +157,7 @@ impl PsbtSession {
     ///
     /// The use-case layer MUST run `crate::psbt::validate_signed_submission`
     /// against the blob at `signed_psbt_ref` before calling this; the entity
-    /// only enforces quorum membership and lifecycle state.
+    /// only enforces policy membership and lifecycle state.
     ///
     /// Idempotent per signer: re-uploading after a crash/retry is a no-op.
     pub fn add_signature(
@@ -170,8 +173,8 @@ impl PsbtSession {
         if !self.is_collecting() {
             return Err(PsbtSessionError::NotCollecting(self.id));
         }
-        if !self.eligible_signers.contains(&fingerprint) {
-            return Err(PsbtSessionError::IneligibleSigner(fingerprint));
+        if !self.keystores.contains(&fingerprint) {
+            return Err(PsbtSessionError::UnknownKeystore(fingerprint));
         }
 
         self.signatures.push(SignatureRecord {
@@ -367,22 +370,22 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
             match event {
                 PsbtSessionEvent::Initialized {
                     id,
-                    vault_id,
-                    proposal_id,
+                    wallet_id,
+                    proposed_by,
                     unsigned_psbt_ref,
                     unsigned_psbt_hash,
                     threshold,
-                    eligible_signers,
+                    keystores,
                     expires_at,
                 } => {
                     builder = builder
                         .id(*id)
-                        .vault_id(*vault_id)
-                        .proposal_id(*proposal_id)
+                        .wallet_id(*wallet_id)
+                        .proposed_by(*proposed_by)
                         .unsigned_psbt_ref(unsigned_psbt_ref.clone())
                         .unsigned_psbt_hash(*unsigned_psbt_hash)
                         .threshold(*threshold)
-                        .eligible_signers(eligible_signers.clone())
+                        .keystores(keystores.clone())
                         .expires_at(*expires_at);
                 }
                 PsbtSessionEvent::SignatureAdded {
@@ -420,24 +423,25 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
     }
 }
 
-/// Quorum parameters for a new session: N-of-M and the collection deadline.
+/// Signing policy of the wallet, snapshotted at session creation (Sparrow
+/// vocabulary: N-of-M `threshold` over the wallet's `keystores`). The
+/// snapshot pins the policy even if wallet membership changes later.
 #[derive(Debug, Clone)]
-pub struct QuorumConfig {
+pub struct Policy {
     pub threshold: u32,
-    pub eligible_signers: Vec<KeyFingerprint>,
-    pub expires_at: DateTime<Utc>,
+    pub keystores: Vec<KeyFingerprint>,
 }
 
 #[derive(Debug, Builder)]
 pub struct NewPsbtSession {
     #[builder(setter(into))]
     pub(super) id: PsbtSessionId,
-    vault_id: VaultId,
-    proposal_id: ProposalId,
+    wallet_id: WalletId,
+    proposed_by: KeyFingerprint,
     unsigned_psbt_ref: BlobRef,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
-    eligible_signers: Vec<KeyFingerprint>,
+    keystores: Vec<KeyFingerprint>,
     expires_at: DateTime<Utc>,
 }
 
@@ -448,50 +452,49 @@ impl NewPsbtSession {
 
     pub fn try_new(
         id: PsbtSessionId,
-        vault_id: VaultId,
-        proposal_id: ProposalId,
+        wallet_id: WalletId,
+        proposed_by: KeyFingerprint,
         unsigned_psbt_ref: BlobRef,
         unsigned_psbt_hash: PsbtHash,
-        quorum: QuorumConfig,
+        policy: Policy,
+        expires_at: DateTime<Utc>,
     ) -> Result<Self, PsbtSessionError> {
-        let QuorumConfig {
+        let Policy {
             threshold,
-            eligible_signers,
-            expires_at,
-        } = quorum;
-        if threshold == 0 || threshold as usize > eligible_signers.len() {
-            return Err(PsbtSessionError::InvalidQuorum {
+            keystores,
+        } = policy;
+        if threshold == 0 || threshold as usize > keystores.len() {
+            return Err(PsbtSessionError::InvalidPolicy {
                 threshold,
-                signers: eligible_signers.len(),
+                keystores: keystores.len(),
             });
         }
+        if !keystores.contains(&proposed_by) {
+            return Err(PsbtSessionError::UnknownKeystore(proposed_by));
+        }
         {
-            let mut dedup = eligible_signers.clone();
+            let mut dedup = keystores.clone();
             dedup.sort();
             dedup.dedup();
-            if dedup.len() != eligible_signers.len() {
-                return Err(PsbtSessionError::DuplicateSignerInQuorum);
+            if dedup.len() != keystores.len() {
+                return Err(PsbtSessionError::DuplicateKeystore);
             }
         }
 
         Ok(Self {
             id,
-            vault_id,
-            proposal_id,
+            wallet_id,
+            proposed_by,
             unsigned_psbt_ref,
             unsigned_psbt_hash,
             threshold,
-            eligible_signers,
+            keystores,
             expires_at,
         })
     }
 
-    pub(super) fn vault_id(&self) -> VaultId {
-        self.vault_id
-    }
-
-    pub(super) fn proposal_id(&self) -> ProposalId {
-        self.proposal_id
+    pub(super) fn wallet_id(&self) -> WalletId {
+        self.wallet_id
     }
 
     pub(super) fn status(&self) -> PsbtSessionStatus {
@@ -505,12 +508,12 @@ impl IntoEvents<PsbtSessionEvent> for NewPsbtSession {
             self.id,
             [PsbtSessionEvent::Initialized {
                 id: self.id,
-                vault_id: self.vault_id,
-                proposal_id: self.proposal_id,
+                wallet_id: self.wallet_id,
+                proposed_by: self.proposed_by,
                 unsigned_psbt_ref: self.unsigned_psbt_ref,
                 unsigned_psbt_hash: self.unsigned_psbt_hash,
                 threshold: self.threshold,
-                eligible_signers: self.eligible_signers,
+                keystores: self.keystores,
                 expires_at: self.expires_at,
             }],
         )
@@ -541,15 +544,15 @@ mod tests {
     fn new_session(threshold: u32, signers: Vec<KeyFingerprint>) -> NewPsbtSession {
         NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            VaultId::new(),
-            ProposalId::new(),
+            WalletId::new(),
+            fp(1),
             BlobRef::new("psbt/unsigned/1"),
             PsbtHash::digest_of(b"unsigned-psbt"),
-            QuorumConfig {
+            Policy {
                 threshold,
-                eligible_signers: signers,
-                expires_at: expires_at(),
+                keystores: signers,
             },
+            expires_at(),
         )
         .unwrap()
     }
@@ -573,7 +576,7 @@ mod tests {
         assert_eq!(session.status(), PsbtSessionStatus::Collecting);
         assert_eq!(session.signature_count(), 0);
         assert!(!session.threshold_met());
-        assert_eq!(session.missing_signers(), vec![fp(1), fp(2), fp(3)]);
+        assert_eq!(session.missing_keystores(), vec![fp(1), fp(2), fp(3)]);
     }
 
     #[test]
@@ -584,7 +587,7 @@ mod tests {
 
         assert!(add_sig(&mut session, 2).unwrap().did_execute());
         assert!(session.threshold_met());
-        assert_eq!(session.missing_signers(), vec![fp(3)]);
+        assert_eq!(session.missing_keystores(), vec![fp(3)]);
 
         // over-signing before finalize is fine — finalize records sigs_used
         assert!(add_sig(&mut session, 3).unwrap().did_execute());
@@ -600,10 +603,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ineligible_signer() {
+    fn rejects_unknown_keystore() {
         let mut session = create_session();
         let result = add_sig(&mut session, 42);
-        assert!(matches!(result, Err(PsbtSessionError::IneligibleSigner(_))));
+        assert!(matches!(result, Err(PsbtSessionError::UnknownKeystore(_))));
     }
 
     #[test]
@@ -891,45 +894,47 @@ mod tests {
     }
 
     #[test]
-    fn invalid_quorum_configs_rejected() {
+    fn invalid_policies_rejected() {
         let signers = vec![fp(1), fp(2)];
-        let quorum = |threshold, eligible_signers| QuorumConfig {
+        let policy = |threshold, keystores| Policy {
             threshold,
-            eligible_signers,
-            expires_at: expires_at(),
+            keystores,
         };
         assert!(matches!(
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
-                VaultId::new(),
-                ProposalId::new(),
+                WalletId::new(),
+                fp(1),
                 BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
-                quorum(0, signers.clone()),
+                policy(0, signers.clone()),
+                expires_at(),
             ),
-            Err(PsbtSessionError::InvalidQuorum { .. })
+            Err(PsbtSessionError::InvalidPolicy { .. })
         ));
         assert!(matches!(
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
-                VaultId::new(),
-                ProposalId::new(),
+                WalletId::new(),
+                fp(1),
                 BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
-                quorum(3, signers),
+                policy(3, signers),
+                expires_at(),
             ),
-            Err(PsbtSessionError::InvalidQuorum { .. })
+            Err(PsbtSessionError::InvalidPolicy { .. })
         ));
         assert!(matches!(
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
-                VaultId::new(),
-                ProposalId::new(),
+                WalletId::new(),
+                fp(1),
                 BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
-                quorum(1, vec![fp(1), fp(1)]),
+                policy(1, vec![fp(1), fp(1)]),
+                expires_at(),
             ),
-            Err(PsbtSessionError::DuplicateSignerInQuorum)
+            Err(PsbtSessionError::DuplicateKeystore)
         ));
     }
 }

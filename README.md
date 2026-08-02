@@ -13,6 +13,12 @@ event-sourced PSBT signing-session lifecycle.
 ### `core/coordination` crate
 
 - **`psbt_session` module** — the `PsbtSession` aggregate (`es-entity`):
+  - Vocabulary follows Sparrow: a session belongs to a **Wallet** and
+    snapshots the wallet's **Policy** (N-of-M `threshold` over
+    `keystores`, identified by their master fingerprints) at creation.
+    Anyone in the wallet can propose a spend — the proposer is recorded
+    as a keystore fingerprint (`proposed_by`); proposers and signers are
+    the same set of people (1-1 user/keystore).
   - Events: `Initialized`, `SignatureAdded`, `Finalized`, `BroadcastSeen`,
     `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
   - Two causality streams: user commands (signature collection, cancel,
@@ -24,8 +30,9 @@ event-sourced PSBT signing-session lifecycle.
   - Collected ≠ used: over-signing is allowed while collecting; `Finalized`
     records exactly which `sigs_used` authorized the spend.
   - Per-signer idempotent signature upload (guard on signer fingerprint).
-  - Quorum validated at construction (`QuorumConfig`: threshold, eligible
-    signer fingerprints, expiry deadline).
+  - Quorum validated at construction (`Policy`: threshold, keystore
+    fingerprints); session-level signature-collection deadline
+    (`expires_at`).
   - `EsRepo` with a strum↔VARCHAR sqlx shim for the status column.
 - **`psbt` module** — `validate_signed_submission`: verifies a
   signer-submitted PSBT is the original unsigned PSBT plus *only* additive
@@ -33,8 +40,8 @@ event-sourced PSBT signing-session lifecycle.
   Two `TODO(security)` items are flagged: binding new signatures to the
   submitter's fingerprint via bip32 key sources, and asserting immutability
   of non-signature PSBT fields.
-- **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `VaultId`,
-  `ProposalId`), `PsbtHash` (SHA-256 content hash), `BlobRef` (object
+- **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `WalletId`),
+  `PsbtHash` (SHA-256 content hash), `BlobRef` (object
   storage reference). PSBT blobs are stored outside the event log; events
   carry ref + hash only.
 

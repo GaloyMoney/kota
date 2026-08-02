@@ -3,7 +3,7 @@ use sqlx::PgPool;
 
 use es_entity::*;
 
-use crate::primitives::{ProposalId, PsbtSessionId, VaultId};
+use crate::primitives::{PsbtSessionId, WalletId};
 
 use super::entity::*;
 use super::primitives::PsbtSessionStatus;
@@ -12,8 +12,7 @@ use super::primitives::PsbtSessionStatus;
 #[es_repo(
     entity = "PsbtSession",
     columns(
-        vault_id(ty = "VaultId", create(accessor = "vault_id()")),
-        proposal_id(ty = "ProposalId", create(accessor = "proposal_id()")),
+        wallet_id(ty = "WalletId", create(accessor = "wallet_id()")),
         status(
             ty = "PsbtSessionStatus",
             list_for,

@@ -20,16 +20,14 @@ pub enum PsbtSessionError {
     Find(#[from] PsbtSessionFindError),
     #[error("PsbtSessionError - Query: {0}")]
     Query(#[from] PsbtSessionQueryError),
-    #[error(
-        "PsbtSessionError - InvalidQuorum: threshold {threshold} with {signers} eligible signers"
-    )]
-    InvalidQuorum { threshold: u32, signers: usize },
-    #[error("PsbtSessionError - DuplicateSignerInQuorum")]
-    DuplicateSignerInQuorum,
+    #[error("PsbtSessionError - InvalidPolicy: threshold {threshold} with {keystores} keystores")]
+    InvalidPolicy { threshold: u32, keystores: usize },
+    #[error("PsbtSessionError - DuplicateKeystore")]
+    DuplicateKeystore,
     #[error("PsbtSessionError - NotCollecting: session {0} is not collecting signatures")]
     NotCollecting(PsbtSessionId),
-    #[error("PsbtSessionError - IneligibleSigner: {0} is not part of this quorum")]
-    IneligibleSigner(KeyFingerprint),
+    #[error("PsbtSessionError - UnknownKeystore: {0} is not part of this wallet's policy")]
+    UnknownKeystore(KeyFingerprint),
     #[error(
         "PsbtSessionError - ThresholdNotMet: {collected} of {threshold} required signatures provided"
     )]

@@ -1,7 +1,6 @@
 CREATE TABLE core_psbt_sessions (
   id UUID PRIMARY KEY,
-  vault_id UUID NOT NULL,
-  proposal_id UUID NOT NULL,
+  wallet_id UUID NOT NULL,
   status VARCHAR NOT NULL,
   created_at TIMESTAMPTZ NOT NULL
 );
