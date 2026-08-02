@@ -2,7 +2,7 @@ use bitcoin::{Txid, bip32::Fingerprint as KeyFingerprint};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
-use crate::primitives::PsbtHash;
+use crate::primitives::{BitcoinAddress, PsbtHash};
 
 /// Lifecycle status, derived by folding the event stream.
 ///
@@ -70,9 +70,10 @@ pub struct OutPointRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendOutput {
-    /// Destination address as text. Parsing/validation (network, allowlist
-    /// policy) happens at the use-case layer; the entity stores the claim.
-    pub address: String,
+    /// Destination address. Syntactic validity is enforced by the type
+    /// (parse at the boundary); network validation happens at the
+    /// wallet layer, where the instance's network is known.
+    pub address: BitcoinAddress,
     pub amount_sats: u64,
 }
 

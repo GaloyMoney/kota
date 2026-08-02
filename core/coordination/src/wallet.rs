@@ -7,11 +7,9 @@
 //!
 //! Plain `sortedmulti` only — no miniscript spending conditions.
 
-use std::str::FromStr;
-
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
 use bitcoin::{
-    Address, Amount, Network, OutPoint, Psbt, Sequence, Transaction, TxIn, TxOut, absolute,
+    Amount, Network, OutPoint, Psbt, Sequence, Transaction, TxIn, TxOut, absolute,
     transaction::Version,
 };
 use miniscript::ForEachKey;
@@ -117,8 +115,9 @@ pub fn build_unsigned_psbt(
     let mut tx_outputs = Vec::with_capacity(spend.outputs.len() + 1);
     let mut total_out = Amount::from_sat(spend.fee_sats);
     for output in &spend.outputs {
-        let address = Address::from_str(&output.address)
-            .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
+        let address = output
+            .address
+            .clone()
             .require_network(network)
             .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
         total_out += Amount::from_sat(output.amount_sats);

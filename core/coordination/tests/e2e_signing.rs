@@ -109,7 +109,9 @@ impl Fixture {
             outputs: vec![SpendOutput {
                 address: bitcoin::Address::from_script(&destination, NETWORK)
                     .unwrap()
-                    .to_string(),
+                    .to_string()
+                    .parse()
+                    .unwrap(),
                 amount_sats: 50_000,
             }],
             fee_sats: 500,
@@ -405,7 +407,9 @@ async fn partial_multi_input_submission_is_rejected() {
         outputs: vec![SpendOutput {
             address: bitcoin::Address::from_script(&destination, NETWORK)
                 .unwrap()
-                .to_string(),
+                .to_string()
+                .parse()
+                .unwrap(),
             amount_sats: 50_000,
         }],
         fee_sats: 500,

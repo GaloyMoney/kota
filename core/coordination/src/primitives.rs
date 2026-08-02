@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use bitcoin::address::{Address, NetworkUnchecked, ParseError};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Digest;
 
 es_entity::entity_id! {
@@ -60,3 +61,52 @@ impl std::str::FromStr for PsbtHash {
 #[derive(Debug, thiserror::Error)]
 #[error("invalid psbt hash: expected 64 lowercase hex characters")]
 pub struct PsbtHashParseError;
+
+/// A syntactically valid bitcoin address (network-unchecked).
+///
+/// Parsing happens at the boundary (proposal time), so malformed
+/// addresses never enter the event stream. The network check is
+/// deliberately deferred: the coordination module is single-network
+/// per instance (network arrives as a parameter, like lana's
+/// module-level config), so `require_network` is called where the
+/// network is known — e.g. `build_unsigned_psbt`.
+///
+/// Serializes transparently as the address string: the persisted event
+/// representation is identical to the previous plain `String` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitcoinAddress(Address<NetworkUnchecked>);
+
+impl BitcoinAddress {
+    /// Assert the address is valid for `network` and return the
+    /// network-checked form.
+    pub fn require_network(self, network: bitcoin::Network) -> Result<Address, ParseError> {
+        self.0.require_network(network)
+    }
+
+    pub fn as_unchecked(&self) -> &Address<NetworkUnchecked> {
+        &self.0
+    }
+}
+
+impl Serialize for BitcoinAddress {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // rust-bitcoin implements Serialize for Address regardless of
+        // network-validation state (as the address string).
+        self.0.serialize(serializer)
+    }
+}
+
+impl std::str::FromStr for BitcoinAddress {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.parse()?))
+    }
+}
+
+impl<'de> Deserialize<'de> for BitcoinAddress {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
