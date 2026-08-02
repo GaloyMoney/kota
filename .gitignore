@@ -1,2 +1,4 @@
 /target
 .env
+.direnv/
+.nix-deps/

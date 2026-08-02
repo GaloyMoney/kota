@@ -90,15 +90,17 @@ event-sourced PSBT signing-session lifecycle.
 
 ## Development
 
-```sh
-# needs DATABASE_URL pointing at a postgres for migrate/prepare
-sqlx migrate run
-cargo sqlx prepare --workspace   # regenerate .sqlx offline cache
+With nix + direnv (recommended): `direnv allow` drops you into a shell
+with the Rust toolchain (from `rust-toolchain.toml`), `sqlx-cli`,
+`cargo-nextest`, and postgres, and sets a directory-scoped
+`DATABASE_URL`.
 
-SQLX_OFFLINE=true cargo test     # unit tests (no DB needed)
-DATABASE_URL=... cargo test      # includes repo round-trip integration test
+```sh
+./dev/bin/pg-start.sh           # local postgres on :5441 + migrations (stop: pg-stop.sh)
+SQLX_OFFLINE=true cargo test    # all tests, incl. repo round-trip against local pg
+
+cargo sqlx prepare --workspace  # regenerate .sqlx offline cache (needs running pg)
 ```
 
-Note: if your shell exports a `DATABASE_URL` for another project, unset it
-before running the tests here — the integration test uses whatever it
-finds.
+Without nix, install the toolchain manually; the integration test skips
+itself when `DATABASE_URL` is unset.
