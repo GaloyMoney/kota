@@ -6,6 +6,8 @@ es_entity::entity_id! {
     WalletId;
 }
 
+es_entity::entity_id! { UserId }
+
 /// Content address (SHA-256) of a PSBT or final-transaction blob.
 ///
 /// Blobs live in dumb content-addressed storage (GCS in deployed envs, local

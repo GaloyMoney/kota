@@ -27,7 +27,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
     let new_session = NewPsbtSession::try_new(
         PsbtSessionId::new(),
         WalletId::new(),
-        fp(1),
+        UserId::new(),
         PsbtHash::digest_of(b"unsigned-psbt"),
         Policy {
             threshold: 2,

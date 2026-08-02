@@ -6,7 +6,7 @@ use es_entity::*;
 use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
 use chrono::{DateTime, Utc};
 
-use crate::primitives::{PsbtHash, PsbtSessionId, WalletId};
+use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
@@ -20,10 +20,13 @@ pub enum PsbtSessionEvent {
     Initialized {
         id: PsbtSessionId,
         wallet_id: WalletId,
-        /// Keystore fingerprint of the wallet member who proposed this
-        /// spend. Anyone in the wallet can propose; proposers and
-        /// signers are the same set of people (1-1 user/keystore).
-        proposed_by: KeyFingerprint,
+        /// User who proposed this spend. Anyone in the wallet can propose.
+        /// This is a platform-attributed business fact (no cryptographic
+        /// evidence exists for it) — unlike signatures, which are
+        /// attributed to keystores and are independently verifiable
+        /// against the stored PSBT blobs. The user ↔ keystore binding is
+        /// enforced by the use-case layer via the (future) user crate.
+        proposed_by: UserId,
         unsigned_psbt_hash: PsbtHash,
         threshold: u32,
         keystores: Vec<KeyFingerprint>,
@@ -69,7 +72,7 @@ pub enum PsbtSessionEvent {
 pub struct PsbtSession {
     pub id: PsbtSessionId,
     pub wallet_id: WalletId,
-    pub proposed_by: KeyFingerprint,
+    pub proposed_by: UserId,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
@@ -421,7 +424,7 @@ pub struct NewPsbtSession {
     #[builder(setter(into))]
     pub(super) id: PsbtSessionId,
     wallet_id: WalletId,
-    proposed_by: KeyFingerprint,
+    proposed_by: UserId,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
@@ -436,7 +439,7 @@ impl NewPsbtSession {
     pub fn try_new(
         id: PsbtSessionId,
         wallet_id: WalletId,
-        proposed_by: KeyFingerprint,
+        proposed_by: UserId,
         unsigned_psbt_hash: PsbtHash,
         policy: Policy,
         expires_at: DateTime<Utc>,
@@ -450,9 +453,6 @@ impl NewPsbtSession {
                 threshold,
                 keystores: keystores.len(),
             });
-        }
-        if !keystores.contains(&proposed_by) {
-            return Err(PsbtSessionError::UnknownKeystore(proposed_by));
         }
         {
             let mut dedup = keystores.clone();
@@ -525,7 +525,7 @@ mod tests {
         NewPsbtSession::try_new(
             PsbtSessionId::new(),
             WalletId::new(),
-            fp(1),
+            UserId::new(),
             PsbtHash::digest_of(b"unsigned-psbt"),
             Policy {
                 threshold,
@@ -855,7 +855,7 @@ mod tests {
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
                 WalletId::new(),
-                fp(1),
+                UserId::new(),
                 PsbtHash::digest_of(b"x"),
                 policy(0, signers.clone()),
                 expires_at(),
@@ -866,7 +866,7 @@ mod tests {
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
                 WalletId::new(),
-                fp(1),
+                UserId::new(),
                 PsbtHash::digest_of(b"x"),
                 policy(3, signers),
                 expires_at(),
@@ -877,7 +877,7 @@ mod tests {
             NewPsbtSession::try_new(
                 PsbtSessionId::new(),
                 WalletId::new(),
-                fp(1),
+                UserId::new(),
                 PsbtHash::digest_of(b"x"),
                 policy(1, vec![fp(1), fp(1)]),
                 expires_at(),

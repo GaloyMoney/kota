@@ -16,9 +16,12 @@ event-sourced PSBT signing-session lifecycle.
   - Vocabulary follows Sparrow: a session belongs to a **Wallet** and
     snapshots the wallet's **Policy** (N-of-M `threshold` over
     `keystores`, identified by their master fingerprints) at creation.
-    Anyone in the wallet can propose a spend — the proposer is recorded
-    as a keystore fingerprint (`proposed_by`); proposers and signers are
-    the same set of people (1-1 user/keystore).
+    Anyone in the wallet can propose a spend. Actor attribution is split
+    by evidence: `proposed_by` is a `UserId` (a platform-attributed
+    business fact), while signatures are attributed to keystore
+    fingerprints (independently verifiable against the stored PSBT
+    blobs). The user ↔ keystore binding is enforced at the use-case
+    layer via the future user crate.
   - Events: `Initialized`, `SignatureAdded`, `Finalized`, `BroadcastSeen`,
     `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
   - Two causality streams: user commands (signature collection, cancel,
