@@ -1,0 +1,37 @@
+name: rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # the .sqlx offline cache is checked in; no database needed.
+  # the repo round-trip test skips itself when DATABASE_URL is unset.
+  SQLX_OFFLINE: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo nextest run --workspace
