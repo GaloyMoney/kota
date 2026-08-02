@@ -12,6 +12,16 @@ event-sourced PSBT signing-session lifecycle.
 
 ### `core/coordination` crate
 
+- **`wallet` module** — the `Wallet` aggregate plus wallet-side bitcoin
+  logic (descriptor construction, PSBT building). Wallet identity is
+  two-layered: `WalletId` is a framework-internal UUID, while
+  `descriptor_fingerprint` is the deterministic content address
+  (SHA-256) of (network, canonical descriptor) — UNIQUE in the
+  database, so re-importing the same wallet is an idempotent find, and
+  any component can recompute it to prove it is operating on the same
+  wallet. Descriptors are canonicalized at construction
+  (`sortedmulti_wsh_descriptor` sorts keystores) so logically identical
+  wallets always fingerprint identically.
 - **`psbt_session` module** — the `PsbtSession` aggregate (`es-entity`):
   - Vocabulary follows Sparrow: a session belongs to a **Wallet** and
     snapshots the wallet's **Policy** (N-of-M `threshold` over
@@ -70,7 +80,8 @@ event-sourced PSBT signing-session lifecycle.
 
 ### Persistence
 
-- Migration: `core_psbt_sessions` + `core_psbt_session_events`
+- Migrations: `core_wallets` + `core_wallet_events`,
+  `core_psbt_sessions` + `core_psbt_session_events`
   (es-entity conventions).
 - `.sqlx/` offline query cache checked in — the workspace compiles without
   a database.
