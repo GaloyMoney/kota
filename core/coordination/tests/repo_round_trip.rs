@@ -3,10 +3,14 @@
 
 use core_coordination::{
     primitives::*,
-    psbt_session::{NewPsbtSession, Policy, PsbtSessionRepo, PsbtSessionStatus},
+    psbt_session::{
+        NewPsbtSession, OutPointRef, Policy, PsbtSessionRepo, PsbtSessionStatus, SpendOutput,
+        SpendSpec,
+    },
 };
 
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
+use bitcoin::hashes::Hash;
 use chrono::{DateTime, Utc};
 use es_entity::clock::ClockHandle;
 
@@ -28,7 +32,18 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
         PsbtSessionId::new(),
         WalletId::new(),
         UserId::new(),
-        PsbtHash::digest_of(b"unsigned-psbt"),
+        SpendSpec {
+            inputs: vec![OutPointRef {
+                txid: bitcoin::Txid::from_byte_array([100; 32]),
+                vout: 0,
+            }],
+            outputs: vec![SpendOutput {
+                address: "bc1qdestination".to_string(),
+                amount_sats: 50_000,
+            }],
+            fee_sats: 500,
+            change_output: None,
+        },
         Policy {
             threshold: 2,
             keystores: vec![fp(1), fp(2), fp(3)],
@@ -37,6 +52,14 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
     )?;
 
     let mut session = repo.create(new_session).await?;
+    assert_eq!(session.status(), PsbtSessionStatus::Pending);
+
+    // the async creation job runs: PSBT built, uploaded, hash recorded
+    session
+        .record_psbt_created(PsbtHash::digest_of(b"unsigned-psbt"))?
+        .unwrap();
+    let persisted = repo.update(&mut session).await?;
+    assert_eq!(persisted, 1, "one PsbtCreated event persisted");
     assert_eq!(session.status(), PsbtSessionStatus::Collecting);
 
     session

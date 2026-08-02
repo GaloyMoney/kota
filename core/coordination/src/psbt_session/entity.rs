@@ -10,7 +10,8 @@ use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
-    FinalizationRecord, InvalidationReason, PsbtSessionStatus, SignatureRecord,
+    FinalizationRecord, InvalidationReason, OutPointRef, PsbtSessionStatus, SignatureRecord,
+    SpendOutput,
 };
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -27,10 +28,22 @@ pub enum PsbtSessionEvent {
         /// against the stored PSBT blobs. The user ↔ keystore binding is
         /// enforced by the use-case layer via the (future) user crate.
         proposed_by: UserId,
-        unsigned_psbt_hash: PsbtHash,
+        /// Denormalized summary of the spend, extracted and validated at
+        /// the use-case layer. The PSBT built from this data (see
+        /// `PsbtCreated`) is the cryptographic source of truth.
+        inputs: Vec<OutPointRef>,
+        outputs: Vec<SpendOutput>,
+        fee_sats: u64,
+        change_output: Option<SpendOutput>,
         threshold: u32,
         keystores: Vec<KeyFingerprint>,
         expires_at: DateTime<Utc>,
+    },
+    /// The async PSBT-creation job built the unsigned PSBT from the
+    /// `Initialized` data and uploaded it to content-addressed storage.
+    /// Transitions the session from Pending to Collecting.
+    PsbtCreated {
+        unsigned_psbt_hash: PsbtHash,
     },
     /// A signer submitted a signed PSBT that passed additive-only
     /// validation (see `crate::psbt`). Collected ≠ used: more signatures
@@ -73,7 +86,12 @@ pub struct PsbtSession {
     pub id: PsbtSessionId,
     pub wallet_id: WalletId,
     pub proposed_by: UserId,
-    unsigned_psbt_hash: PsbtHash,
+    pub inputs: Vec<OutPointRef>,
+    pub outputs: Vec<SpendOutput>,
+    pub fee_sats: u64,
+    pub change_output: Option<SpendOutput>,
+    #[builder(setter(strip_option), default)]
+    unsigned_psbt_hash: Option<PsbtHash>,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
     expires_at: DateTime<Utc>,
@@ -96,13 +114,15 @@ impl PsbtSession {
                 PsbtSessionEvent::Invalidated { .. } => return PsbtSessionStatus::Invalidated,
                 PsbtSessionEvent::BroadcastSeen { .. } => return PsbtSessionStatus::Broadcast,
                 PsbtSessionEvent::Finalized { .. } => return PsbtSessionStatus::Finalized,
+                PsbtSessionEvent::PsbtCreated { .. } => return PsbtSessionStatus::Collecting,
                 _ => {}
             }
         }
-        PsbtSessionStatus::Collecting
+        PsbtSessionStatus::Pending
     }
 
-    pub fn unsigned_psbt_hash(&self) -> PsbtHash {
+    /// Content address of the unsigned PSBT, once the creation job ran.
+    pub fn unsigned_psbt_hash(&self) -> Option<PsbtHash> {
         self.unsigned_psbt_hash
     }
 
@@ -150,6 +170,33 @@ impl PsbtSession {
         self.signatures
             .iter()
             .any(|s| s.fingerprint == *fingerprint)
+    }
+
+    /// Record the unsigned PSBT built by the async creation job.
+    ///
+    /// The job reads the `Initialized` data (inputs/outputs/fee/change),
+    /// builds the PSBT, uploads it to content-addressed storage, then
+    /// calls this with the resulting hash. Transitions the session from
+    /// Pending to Collecting — signatures are not accepted before this.
+    pub fn record_psbt_created(
+        &mut self,
+        unsigned_psbt_hash: PsbtHash,
+    ) -> Result<Idempotent<()>, PsbtSessionError> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: PsbtSessionEvent::PsbtCreated { .. },
+        );
+        if self.status() != PsbtSessionStatus::Pending {
+            return Err(PsbtSessionError::CannotAttachPsbt {
+                id: self.id,
+                status: self.status(),
+            });
+        }
+
+        self.unsigned_psbt_hash = Some(unsigned_psbt_hash);
+        self.events
+            .push(PsbtSessionEvent::PsbtCreated { unsigned_psbt_hash });
+        Ok(Idempotent::Executed(()))
     }
 
     /// Record a validated signed-PSBT submission.
@@ -317,8 +364,14 @@ impl PsbtSession {
             self.events.iter_all().rev(),
             already_applied: PsbtSessionEvent::Expired { .. },
         );
-        if !self.is_collecting() {
-            return Err(PsbtSessionError::NotCollecting(self.id));
+        match self.status() {
+            PsbtSessionStatus::Pending | PsbtSessionStatus::Collecting => {}
+            status => {
+                return Err(PsbtSessionError::CannotExpire {
+                    id: self.id,
+                    status,
+                });
+            }
         }
         if now < self.expires_at {
             return Err(PsbtSessionError::NotYetExpired {
@@ -332,14 +385,17 @@ impl PsbtSession {
 
     /// Cancellation is only meaningful before broadcast — once the tx is
     /// out, the chain decides. `Finalized` is still cancellable ("do not
-    /// broadcast, abandon").
+    /// broadcast, abandon"), as is a `Pending` session whose PSBT
+    /// creation is stuck.
     pub fn cancel(&mut self, reason: String) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: PsbtSessionEvent::Cancelled { .. },
         );
         match self.status() {
-            PsbtSessionStatus::Collecting | PsbtSessionStatus::Finalized => {}
+            PsbtSessionStatus::Pending
+            | PsbtSessionStatus::Collecting
+            | PsbtSessionStatus::Finalized => {}
             status => {
                 return Err(PsbtSessionError::CannotCancel {
                     id: self.id,
@@ -365,7 +421,10 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                     id,
                     wallet_id,
                     proposed_by,
-                    unsigned_psbt_hash,
+                    inputs,
+                    outputs,
+                    fee_sats,
+                    change_output,
                     threshold,
                     keystores,
                     expires_at,
@@ -374,10 +433,16 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                         .id(*id)
                         .wallet_id(*wallet_id)
                         .proposed_by(*proposed_by)
-                        .unsigned_psbt_hash(*unsigned_psbt_hash)
+                        .inputs(inputs.clone())
+                        .outputs(outputs.clone())
+                        .fee_sats(*fee_sats)
+                        .change_output(change_output.clone())
                         .threshold(*threshold)
                         .keystores(keystores.clone())
                         .expires_at(*expires_at);
+                }
+                PsbtSessionEvent::PsbtCreated { unsigned_psbt_hash } => {
+                    builder = builder.unsigned_psbt_hash(*unsigned_psbt_hash);
                 }
                 PsbtSessionEvent::SignatureAdded {
                     fingerprint,
@@ -419,13 +484,26 @@ pub struct Policy {
     pub keystores: Vec<KeyFingerprint>,
 }
 
+/// What the spend moves: coins consumed, destinations, fee, and change.
+/// The async PSBT-creation job builds the unsigned PSBT from this spec.
+#[derive(Debug, Clone)]
+pub struct SpendSpec {
+    pub inputs: Vec<OutPointRef>,
+    pub outputs: Vec<SpendOutput>,
+    pub fee_sats: u64,
+    pub change_output: Option<SpendOutput>,
+}
+
 #[derive(Debug, Builder)]
 pub struct NewPsbtSession {
     #[builder(setter(into))]
     pub(super) id: PsbtSessionId,
     wallet_id: WalletId,
     proposed_by: UserId,
-    unsigned_psbt_hash: PsbtHash,
+    inputs: Vec<OutPointRef>,
+    outputs: Vec<SpendOutput>,
+    fee_sats: u64,
+    change_output: Option<SpendOutput>,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
     expires_at: DateTime<Utc>,
@@ -440,10 +518,22 @@ impl NewPsbtSession {
         id: PsbtSessionId,
         wallet_id: WalletId,
         proposed_by: UserId,
-        unsigned_psbt_hash: PsbtHash,
+        spend: SpendSpec,
         policy: Policy,
         expires_at: DateTime<Utc>,
     ) -> Result<Self, PsbtSessionError> {
+        let SpendSpec {
+            inputs,
+            outputs,
+            fee_sats,
+            change_output,
+        } = spend;
+        if inputs.is_empty() {
+            return Err(PsbtSessionError::EmptyInputs);
+        }
+        if outputs.is_empty() {
+            return Err(PsbtSessionError::EmptyOutputs);
+        }
         let Policy {
             threshold,
             keystores,
@@ -467,7 +557,10 @@ impl NewPsbtSession {
             id,
             wallet_id,
             proposed_by,
-            unsigned_psbt_hash,
+            inputs,
+            outputs,
+            fee_sats,
+            change_output,
             threshold,
             keystores,
             expires_at,
@@ -479,7 +572,7 @@ impl NewPsbtSession {
     }
 
     pub(super) fn status(&self) -> PsbtSessionStatus {
-        PsbtSessionStatus::Collecting
+        PsbtSessionStatus::Pending
     }
 }
 
@@ -491,7 +584,10 @@ impl IntoEvents<PsbtSessionEvent> for NewPsbtSession {
                 id: self.id,
                 wallet_id: self.wallet_id,
                 proposed_by: self.proposed_by,
-                unsigned_psbt_hash: self.unsigned_psbt_hash,
+                inputs: self.inputs,
+                outputs: self.outputs,
+                fee_sats: self.fee_sats,
+                change_output: self.change_output,
                 threshold: self.threshold,
                 keystores: self.keystores,
                 expires_at: self.expires_at,
@@ -521,12 +617,34 @@ mod tests {
         DateTime::from_timestamp(2_000_000_000, 0).unwrap()
     }
 
+    fn sample_spend() -> SpendSpec {
+        SpendSpec {
+            inputs: vec![OutPointRef {
+                txid: dummy_txid(100),
+                vout: 0,
+            }],
+            outputs: vec![SpendOutput {
+                address: "bc1qdestination".to_string(),
+                amount_sats: 50_000,
+            }],
+            fee_sats: 500,
+            change_output: Some(SpendOutput {
+                address: "bc1qchange".to_string(),
+                amount_sats: 10_000,
+            }),
+        }
+    }
+
+    fn unsigned_psbt_hash() -> PsbtHash {
+        PsbtHash::digest_of(b"unsigned-psbt")
+    }
+
     fn new_session(threshold: u32, signers: Vec<KeyFingerprint>) -> NewPsbtSession {
         NewPsbtSession::try_new(
             PsbtSessionId::new(),
             WalletId::new(),
             UserId::new(),
-            PsbtHash::digest_of(b"unsigned-psbt"),
+            sample_spend(),
             Policy {
                 threshold,
                 keystores: signers,
@@ -536,9 +654,17 @@ mod tests {
         .unwrap()
     }
 
+    /// A freshly proposed session: Pending, no PSBT yet.
     fn create_session() -> PsbtSession {
         let signers = vec![fp(1), fp(2), fp(3)];
         PsbtSession::try_from_events(new_session(2, signers).into_events()).unwrap()
+    }
+
+    /// A session whose PSBT-creation job has run: Collecting.
+    fn create_collecting_session() -> PsbtSession {
+        let mut session = create_session();
+        let _ = session.record_psbt_created(unsigned_psbt_hash()).unwrap();
+        session
     }
 
     fn add_sig(session: &mut PsbtSession, byte: u8) -> Result<Idempotent<()>, PsbtSessionError> {
@@ -548,18 +674,73 @@ mod tests {
         )
     }
 
+    fn finalize(session: &mut PsbtSession, sigs_used: Vec<KeyFingerprint>) {
+        let _ = session
+            .finalize(dummy_txid(1), PsbtHash::digest_of(b"final-tx"), sigs_used)
+            .unwrap();
+    }
+
     #[test]
-    fn new_session_is_collecting() {
+    fn new_session_is_pending() {
         let session = create_session();
-        assert_eq!(session.status(), PsbtSessionStatus::Collecting);
+        assert_eq!(session.status(), PsbtSessionStatus::Pending);
+        assert_eq!(session.unsigned_psbt_hash(), None);
         assert_eq!(session.signature_count(), 0);
         assert!(!session.threshold_met());
         assert_eq!(session.missing_keystores(), vec![fp(1), fp(2), fp(3)]);
+        assert_eq!(session.inputs, sample_spend().inputs);
+        assert_eq!(session.outputs, sample_spend().outputs);
+        assert_eq!(session.fee_sats, 500);
+        assert_eq!(session.change_output, sample_spend().change_output);
+    }
+
+    #[test]
+    fn psbt_created_transitions_to_collecting() {
+        let mut session = create_session();
+        assert!(
+            session
+                .record_psbt_created(unsigned_psbt_hash())
+                .unwrap()
+                .did_execute()
+        );
+        assert_eq!(session.status(), PsbtSessionStatus::Collecting);
+        assert_eq!(session.unsigned_psbt_hash(), Some(unsigned_psbt_hash()));
+    }
+
+    #[test]
+    fn psbt_created_is_idempotent() {
+        let mut session = create_session();
+        let _ = session.record_psbt_created(unsigned_psbt_hash()).unwrap();
+        assert!(
+            session
+                .record_psbt_created(unsigned_psbt_hash())
+                .unwrap()
+                .was_already_applied()
+        );
+    }
+
+    #[test]
+    fn no_signatures_before_psbt_created() {
+        let mut session = create_session();
+        assert!(matches!(
+            add_sig(&mut session, 1),
+            Err(PsbtSessionError::NotCollecting(_))
+        ));
+    }
+
+    #[test]
+    fn cannot_attach_psbt_after_cancel() {
+        let mut session = create_session();
+        let _ = session.cancel("gave up".to_string()).unwrap();
+        assert!(matches!(
+            session.record_psbt_created(unsigned_psbt_hash()),
+            Err(PsbtSessionError::CannotAttachPsbt { .. })
+        ));
     }
 
     #[test]
     fn collects_signatures_up_to_and_beyond_threshold() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         assert!(add_sig(&mut session, 1).unwrap().did_execute());
         assert!(!session.threshold_met());
 
@@ -574,7 +755,7 @@ mod tests {
 
     #[test]
     fn signature_upload_is_idempotent_per_signer() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         assert!(add_sig(&mut session, 1).unwrap().did_execute());
         assert!(add_sig(&mut session, 1).unwrap().was_already_applied());
         assert_eq!(session.signature_count(), 1);
@@ -582,14 +763,14 @@ mod tests {
 
     #[test]
     fn rejects_unknown_keystore() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let result = add_sig(&mut session, 42);
         assert!(matches!(result, Err(PsbtSessionError::UnknownKeystore(_))));
     }
 
     #[test]
     fn finalize_requires_threshold_and_collected_sigs() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
 
         // below threshold
@@ -613,7 +794,7 @@ mod tests {
 
     #[test]
     fn finalize_at_threshold_records_sigs_used() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         let _ = add_sig(&mut session, 3).unwrap();
@@ -633,16 +814,10 @@ mod tests {
 
     #[test]
     fn finalize_is_idempotent() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
-        let _ = session
-            .finalize(
-                dummy_txid(1),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
 
         let result = session.finalize(
             dummy_txid(1),
@@ -654,22 +829,16 @@ mod tests {
 
     #[test]
     fn no_signatures_after_finalize_or_cancel() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
-        let _ = session
-            .finalize(
-                dummy_txid(1),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
         assert!(matches!(
             add_sig(&mut session, 3),
             Err(PsbtSessionError::NotCollecting(_))
         ));
 
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = session.cancel("changed mind".to_string()).unwrap();
         assert!(matches!(
             add_sig(&mut session, 1),
@@ -679,13 +848,11 @@ mod tests {
 
     #[test]
     fn chain_progression_finalize_broadcast_confirm() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
-        let _ = session
-            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
 
         // txid mismatch is rejected — chain events must match the final tx
         assert!(matches!(
@@ -713,13 +880,11 @@ mod tests {
 
     #[test]
     fn broadcast_seen_after_confirm_is_redundant() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
-        let _ = session
-            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
         let _ = session.confirm(txid, 800_000, dummy_block_hash(1)).unwrap();
 
         // catch-up sync delivers the mempool sighting late
@@ -734,13 +899,11 @@ mod tests {
 
     #[test]
     fn reorg_invalidates_and_reconfirm_executes_again() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
-        let _ = session
-            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
         let _ = session.mark_broadcast_seen(txid).unwrap();
         let _ = session.confirm(txid, 800_000, dummy_block_hash(1)).unwrap();
 
@@ -774,7 +937,7 @@ mod tests {
 
     #[test]
     fn cannot_invalidate_before_broadcast() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         assert!(matches!(
             session.invalidate(InvalidationReason::InputsSpentExternally),
             Err(PsbtSessionError::CannotInvalidate { .. })
@@ -783,7 +946,7 @@ mod tests {
 
     #[test]
     fn expiry_is_platform_policy() {
-        let mut session = create_session();
+        let mut session = create_collecting_session();
 
         let before_expiry = expires_at() - chrono::Duration::hours(1);
         assert!(matches!(
@@ -797,8 +960,28 @@ mod tests {
     }
 
     #[test]
+    fn pending_session_can_expire_too() {
+        let mut session = create_session();
+        assert!(session.expire(expires_at()).unwrap().did_execute());
+        assert_eq!(session.status(), PsbtSessionStatus::Expired);
+    }
+
+    #[test]
+    fn cannot_expire_finalized_session() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        let _ = add_sig(&mut session, 2).unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
+        assert!(matches!(
+            session.expire(expires_at()),
+            Err(PsbtSessionError::CannotExpire { .. })
+        ));
+    }
+
+    #[test]
     fn cancel_only_before_broadcast() {
         let mut session = create_session();
+        // pending (stuck PSBT creation) can be cancelled
         assert!(
             session
                 .cancel("no longer needed".to_string())
@@ -814,29 +997,17 @@ mod tests {
         );
 
         // finalized-but-not-broadcast can still be abandoned
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
-        let _ = session
-            .finalize(
-                dummy_txid(1),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
         assert!(session.cancel("abandon".to_string()).unwrap().did_execute());
 
         // once broadcast, the chain decides
-        let mut session = create_session();
+        let mut session = create_collecting_session();
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
-        let _ = session
-            .finalize(
-                dummy_txid(1),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
-            .unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
         let _ = session.mark_broadcast_seen(dummy_txid(1)).unwrap();
         assert!(matches!(
             session.cancel("too late".to_string()),
@@ -856,7 +1027,7 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 UserId::new(),
-                PsbtHash::digest_of(b"x"),
+                sample_spend(),
                 policy(0, signers.clone()),
                 expires_at(),
             ),
@@ -867,7 +1038,7 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 UserId::new(),
-                PsbtHash::digest_of(b"x"),
+                sample_spend(),
                 policy(3, signers),
                 expires_at(),
             ),
@@ -878,11 +1049,48 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 UserId::new(),
-                PsbtHash::digest_of(b"x"),
+                sample_spend(),
                 policy(1, vec![fp(1), fp(1)]),
                 expires_at(),
             ),
             Err(PsbtSessionError::DuplicateKeystore)
+        ));
+    }
+
+    #[test]
+    fn empty_spend_rejected() {
+        let signers = vec![fp(1), fp(2)];
+        let policy = Policy {
+            threshold: 2,
+            keystores: signers,
+        };
+
+        let mut spend = sample_spend();
+        spend.inputs = vec![];
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                spend,
+                policy.clone(),
+                expires_at(),
+            ),
+            Err(PsbtSessionError::EmptyInputs)
+        ));
+
+        let mut spend = sample_spend();
+        spend.outputs = vec![];
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                spend,
+                policy,
+                expires_at(),
+            ),
+            Err(PsbtSessionError::EmptyOutputs)
         ));
     }
 }

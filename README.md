@@ -22,8 +22,14 @@ event-sourced PSBT signing-session lifecycle.
     fingerprints (independently verifiable against the stored PSBT
     blobs). The user ↔ keystore binding is enforced at the use-case
     layer via the future user crate.
-  - Events: `Initialized`, `SignatureAdded`, `Finalized`, `BroadcastSeen`,
-    `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
+  - Proposal and PSBT creation are decoupled: `Initialized` carries a
+    denormalized `SpendSpec` (inputs as outpoints, outputs, fee, change)
+    and the session starts `Pending`; an async job builds the unsigned
+    PSBT from the spec, uploads it to content-addressed storage, and
+    appends `PsbtCreated` with the hash — only then does signature
+    collection open (`Collecting`).
+  - Events: `Initialized`, `PsbtCreated`, `SignatureAdded`, `Finalized`,
+    `BroadcastSeen`, `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
   - Two causality streams: user commands (signature collection, cancel,
     expire) and chain-sync observations (broadcast/confirm/invalidate),
     kept separate — chain events must match the finalized txid.

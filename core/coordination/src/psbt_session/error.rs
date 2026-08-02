@@ -28,6 +28,15 @@ pub enum PsbtSessionError {
     NotCollecting(PsbtSessionId),
     #[error("PsbtSessionError - UnknownKeystore: {0} is not part of this wallet's policy")]
     UnknownKeystore(KeyFingerprint),
+    #[error("PsbtSessionError - EmptyInputs: a spend must consume at least one utxo")]
+    EmptyInputs,
+    #[error("PsbtSessionError - EmptyOutputs: a spend must have at least one output")]
+    EmptyOutputs,
+    #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
+    CannotAttachPsbt {
+        id: PsbtSessionId,
+        status: PsbtSessionStatus,
+    },
     #[error(
         "PsbtSessionError - ThresholdNotMet: {collected} of {threshold} required signatures provided"
     )]
@@ -48,6 +57,11 @@ pub enum PsbtSessionError {
     },
     #[error("PsbtSessionError - CannotCancel: session {id} is in status {status}")]
     CannotCancel {
+        id: PsbtSessionId,
+        status: PsbtSessionStatus,
+    },
+    #[error("PsbtSessionError - CannotExpire: session {id} is in status {status}")]
+    CannotExpire {
         id: PsbtSessionId,
         status: PsbtSessionStatus,
     },

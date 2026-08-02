@@ -29,7 +29,10 @@ use crate::primitives::PsbtHash;
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum PsbtSessionStatus {
+    /// Proposed; the async PSBT-creation job has not run yet.
     #[default]
+    Pending,
+    /// PSBT created and uploaded; collecting signatures.
     Collecting,
     Finalized,
     Broadcast,
@@ -51,6 +54,26 @@ pub enum InvalidationReason {
     ReplacedByFeeBump,
     /// Dropped from the mempool (e.g. fee below minimum after eviction).
     MempoolEvicted,
+}
+
+/// An outpoint consumed by the spend (txid:vout). Immutable once the
+/// session is proposed — it's part of the unsigned tx the PSBT-creation
+/// job builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutPointRef {
+    pub txid: Txid,
+    pub vout: u32,
+}
+
+/// A destination of the spend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendOutput {
+    /// Destination address as text. Parsing/validation (network, allowlist
+    /// policy) happens at the use-case layer; the entity stores the claim.
+    pub address: String,
+    pub amount_sats: u64,
 }
 
 /// A collected signature: who signed, and where the signed PSBT blob lives.
