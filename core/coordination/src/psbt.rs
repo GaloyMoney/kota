@@ -12,8 +12,10 @@
 //! stripped cosigner signatures, altered scripts — is rejected here, at the
 //! use-case layer, before any event is recorded.
 
+use bitcoin::bip32::Fingerprint as KeyFingerprint;
+use bitcoin::ecdsa::Signature as EcdsaSignature;
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
-use bitcoin::{Psbt, secp256k1};
+use bitcoin::{Psbt, PublicKey, secp256k1};
 use miniscript::psbt::PsbtExt;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,18 +49,46 @@ pub enum PsbtValidationError {
          slot (add_signature is idempotent per fingerprint, the first upload is final)"
     )]
     InvalidPartialSignature(usize),
+    #[error(
+        "partial signature at input {index} is for pubkey {pubkey}, which is not bound to \
+         keystore {expected} in the original PSBT's bip32 derivation — a signer may only \
+         contribute signatures for their own keystore"
+    )]
+    SignatureNotBoundToSigner {
+        index: usize,
+        pubkey: PublicKey,
+        expected: KeyFingerprint,
+    },
 }
 
 pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
     Psbt::deserialize(bytes).map_err(|e| PsbtValidationError::Deserialize(e.to_string()))
 }
 
-/// Verify that `signed` is `original` plus only additive partial signatures,
-/// and that the submission is *complete*: every input must gain at least one
-/// new partial signature. A signer signs the whole transaction (standard
-/// SIGHASH_ALL behavior); allowing a partially-signed upload would brick the
-/// session, because `add_signature` is idempotent per fingerprint and the
-/// first upload sticks.
+/// A partial signature extracted from a validated submission, ready to be
+/// merged into the platform's copy of the original PSBT.
+#[derive(Debug, Clone)]
+pub struct ExtractedSignature {
+    pub input_index: usize,
+    pub pubkey: PublicKey,
+    pub signature: EcdsaSignature,
+}
+
+/// Verify that `signed` is `original` plus only additive partial signatures
+/// *from the claimed signer*, and that the submission is *complete*: every
+/// input must gain at least one new partial signature. A signer signs the
+/// whole transaction (standard SIGHASH_ALL behavior); allowing a
+/// partially-signed upload would brick the session, because `add_signature`
+/// is idempotent per fingerprint and the first upload sticks.
+///
+/// `expected_fingerprint` is the keystore fingerprint the use-case layer
+/// authenticated the uploader as. Every new partial signature must be for a
+/// pubkey whose `bip32_derivation` key source *in the original PSBT* carries
+/// that fingerprint. This is what stops signature smuggling: partial sigs
+/// are just bytes — anyone who fetched a cosigner's uploaded blob could
+/// otherwise re-upload that cosigner's signatures as their own submission,
+/// corrupting the audit trail (`Finalized::sigs_used` claims to record who
+/// authorized the spend).
 ///
 /// Every *new* partial signature is additionally verified cryptographically:
 /// it must use `SIGHASH_ALL` and must verify against the sighash computed
@@ -73,18 +103,19 @@ pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
 ///   `SIGHASH_ANYONECANPAY`) would let the transaction be malleated after
 ///   the signer approved it.
 ///
-/// Returns the number of new partial signatures added across all inputs.
+/// Returns the extracted new partial signatures. The caller MUST persist a
+/// PSBT rebuilt via [`merge_partial_sigs`] from the original plus these
+/// signatures — never the submitted document, whose non-signature fields
+/// are attacker-controlled.
 ///
-/// TODO(security): bind the *new* partial signatures to the submitting
-/// signer's fingerprint via `bip32_derivation` key sources, so a signer
-/// cannot smuggle in signatures for other wallet members' keys.
 /// TODO(security): also assert immutability of the non-signature fields we
 /// care about (sighash types, redeem/witness scripts, proprietary keys) —
 /// partial_sigs are not the only mutable-looking field in a PSBT.
 pub fn validate_signed_submission(
     original: &Psbt,
     signed: &Psbt,
-) -> Result<usize, PsbtValidationError> {
+    expected_fingerprint: &KeyFingerprint,
+) -> Result<Vec<ExtractedSignature>, PsbtValidationError> {
     if signed.unsigned_tx != original.unsigned_tx {
         return Err(PsbtValidationError::UnsignedTxModified);
     }
@@ -97,8 +128,8 @@ pub fn validate_signed_submission(
     let secp = secp256k1::Secp256k1::verification_only();
     let mut cache = SighashCache::new(&original.unsigned_tx);
 
-    let mut added = 0usize;
-    let mut all_inputs_signed = true;
+    let mut extracted = Vec::new();
+    let mut first_incomplete_input = None;
     for (idx, (orig_in, signed_in)) in original.inputs.iter().zip(signed.inputs.iter()).enumerate()
     {
         for (pk, sig) in &orig_in.partial_sigs {
@@ -112,6 +143,20 @@ pub fn validate_signed_submission(
             if orig_in.partial_sigs.contains_key(pk) {
                 // already checked byte-equal against the original above
                 continue;
+            }
+            // Bind the signature to the authenticated signer via the
+            // *original* PSBT's key sources (platform-built, trusted):
+            // the submitting document's own bip32_derivation is
+            // attacker-controlled and proves nothing.
+            match orig_in.bip32_derivation.get(&pk.inner) {
+                Some((fingerprint, _)) if fingerprint == expected_fingerprint => {}
+                _ => {
+                    return Err(PsbtValidationError::SignatureNotBoundToSigner {
+                        index: idx,
+                        pubkey: *pk,
+                        expected: *expected_fingerprint,
+                    });
+                }
             }
             if sig.sighash_type != EcdsaSighashType::All {
                 return Err(PsbtValidationError::NonSigHashAllSighash(idx));
@@ -130,26 +175,36 @@ pub fn validate_signed_submission(
             secp.verify_ecdsa(&msg, &sig.signature, &pk.inner)
                 .map_err(|_| PsbtValidationError::InvalidPartialSignature(idx))?;
             added_here += 1;
+            extracted.push(ExtractedSignature {
+                input_index: idx,
+                pubkey: *pk,
+                signature: *sig,
+            });
         }
-        if added_here == 0 {
-            all_inputs_signed = false;
+        if added_here == 0 && first_incomplete_input.is_none() {
+            first_incomplete_input = Some(idx);
         }
-        added += added_here;
     }
 
-    if added == 0 {
+    if extracted.is_empty() {
         return Err(PsbtValidationError::NoNewSignatures);
     }
-    if !all_inputs_signed {
-        let idx = original
-            .inputs
-            .iter()
-            .zip(signed.inputs.iter())
-            .position(|(orig_in, signed_in)| {
-                signed_in.partial_sigs.len() == orig_in.partial_sigs.len()
-            })
-            .expect("all_inputs_signed is false, so some input gained no signature");
+    if let Some(idx) = first_incomplete_input {
         return Err(PsbtValidationError::IncompleteSubmission(idx));
     }
-    Ok(added)
+    Ok(extracted)
+}
+
+/// Rebuild the merged PSBT the platform persists: the *original*
+/// platform-built document plus exactly the validated new partial
+/// signatures. The submitted document itself is never stored or
+/// finalized — only these extracted signatures cross the trust boundary.
+pub fn merge_partial_sigs(original: &Psbt, new_sigs: &[ExtractedSignature]) -> Psbt {
+    let mut merged = original.clone();
+    for sig in new_sigs {
+        merged.inputs[sig.input_index]
+            .partial_sigs
+            .insert(sig.pubkey, sig.signature);
+    }
+    merged
 }
