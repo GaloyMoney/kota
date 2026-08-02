@@ -3,14 +3,19 @@
 //! This is the security-critical code path of the signing flow. Signers
 //! return a full PSBT document (BIP-174 is a *mergeable* format); before the
 //! platform appends a `SignatureAdded` event it must prove the submission is
-//! the original unsigned PSBT plus *only* additive partial signatures, and
-//! that the submission is complete (every input signed): `add_signature` is
-//! idempotent per fingerprint, so accepting a partial first upload would
-//! permanently brick a multi-input session.
+//! the original unsigned PSBT plus *only* additive partial signatures from
+//! the authenticated signer, and that the submission is complete (every
+//! input signed): `add_signature` is idempotent per fingerprint, so
+//! accepting a partial first upload would permanently brick a multi-input
+//! session.
 //!
 //! Anything a signer's software changed beyond that — modified outputs,
-//! stripped cosigner signatures, altered scripts — is rejected here, at the
-//! use-case layer, before any event is recorded.
+//! stripped cosigner signatures, altered scripts, touched utxo/proprietary
+//! fields — is rejected here, at the use-case layer, before any event is
+//! recorded. And even for accepted submissions, only the extracted
+//! signatures are used: the platform persists a PSBT rebuilt from the
+//! original document, so attacker-controlled fields never reach
+//! finalization.
 
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
 use bitcoin::ecdsa::Signature as EcdsaSignature;
@@ -59,6 +64,15 @@ pub enum PsbtValidationError {
         pubkey: PublicKey,
         expected: KeyFingerprint,
     },
+    #[error("global psbt field (version/xpub/proprietary/unknown) was modified")]
+    GlobalFieldModified,
+    #[error(
+        "non-signature field of input {0} was modified (utxo, scripts, sighash type, \
+         key sources, preimages, proprietary/unknown keys)"
+    )]
+    InputFieldModified(usize),
+    #[error("output map {0} was modified (scripts, key sources, proprietary/unknown keys)")]
+    OutputFieldModified(usize),
 }
 
 pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
@@ -108,9 +122,16 @@ pub struct ExtractedSignature {
 /// signatures — never the submitted document, whose non-signature fields
 /// are attacker-controlled.
 ///
-/// TODO(security): also assert immutability of the non-signature fields we
-/// care about (sighash types, redeem/witness scripts, proprietary keys) —
-/// partial_sigs are not the only mutable-looking field in a PSBT.
+/// All non-signature fields are asserted immutable: global
+/// version/xpub/proprietary/unknown maps, every output map, and every input
+/// field except `partial_sigs` (utxos, redeem/witness scripts, sighash
+/// types, key sources, preimages, ...). This is deliberately strict —
+/// signer software that decorates the PSBT with extra fields will be
+/// rejected and must re-export — because (a) only the extracted signatures
+/// are ever used, so extra fields carry no information the platform needs,
+/// and (b) a submission with tampered fields is an unambiguous signal of
+/// malicious or broken signer software that should halt the ceremony, not
+/// be silently absorbed.
 pub fn validate_signed_submission(
     original: &Psbt,
     signed: &Psbt,
@@ -123,6 +144,23 @@ pub fn validate_signed_submission(
         || signed.outputs.len() != original.outputs.len()
     {
         return Err(PsbtValidationError::InputOutputCountMismatch);
+    }
+    if signed.version != original.version
+        || signed.xpub != original.xpub
+        || signed.proprietary != original.proprietary
+        || signed.unknown != original.unknown
+    {
+        return Err(PsbtValidationError::GlobalFieldModified);
+    }
+    for (idx, (orig_out, signed_out)) in original
+        .outputs
+        .iter()
+        .zip(signed.outputs.iter())
+        .enumerate()
+    {
+        if signed_out != orig_out {
+            return Err(PsbtValidationError::OutputFieldModified(idx));
+        }
     }
 
     let secp = secp256k1::Secp256k1::verification_only();
@@ -137,6 +175,13 @@ pub fn validate_signed_submission(
                 Some(s) if s == sig => {}
                 _ => return Err(PsbtValidationError::PartialSignatureRemoved(idx)),
             }
+        }
+        // Everything except partial_sigs must be byte-identical to the
+        // original input map.
+        let mut signed_in_stripped = signed_in.clone();
+        signed_in_stripped.partial_sigs = orig_in.partial_sigs.clone();
+        if signed_in_stripped != *orig_in {
+            return Err(PsbtValidationError::InputFieldModified(idx));
         }
         let mut added_here = 0usize;
         for (pk, sig) in &signed_in.partial_sigs {

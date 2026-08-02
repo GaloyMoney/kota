@@ -579,3 +579,94 @@ async fn smuggled_cosigner_signature_is_rejected() {
         Err(core_coordination::psbt::PsbtValidationError::SignatureNotBoundToSigner { .. })
     ));
 }
+
+#[tokio::test]
+async fn tampered_witness_utxo_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // shrink the witness_utxo amount — if this reached finalization it
+    // would change every cosigner's sighash context
+    signed.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(1);
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::InputFieldModified(0))
+    ));
+}
+
+#[tokio::test]
+async fn tampered_output_map_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // strip the change output's witness script — the data signing devices
+    // use to verify the change belongs to the wallet
+    signed.outputs[1].witness_script = None;
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::OutputFieldModified(1))
+    ));
+}
+
+#[tokio::test]
+async fn added_global_field_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // signer software decorating the PSBT with extra global fields is
+    // rejected outright — only extracted signatures may cross the boundary
+    signed.proprietary.insert(
+        bitcoin::psbt::raw::ProprietaryKey {
+            prefix: b"evil".to_vec(),
+            subtype: 0,
+            key: vec![],
+        },
+        vec![1, 2, 3],
+    );
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::GlobalFieldModified)
+    ));
+}
