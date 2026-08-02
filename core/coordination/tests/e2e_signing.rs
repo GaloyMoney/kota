@@ -439,3 +439,84 @@ async fn partial_multi_input_submission_is_rejected() {
         Err(core_coordination::psbt::PsbtValidationError::IncompleteSubmission(1))
     ));
 }
+
+#[tokio::test]
+async fn invalid_partial_signature_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    // a validly-formed ECDSA signature over the *wrong message* — the
+    // classic grief: first upload per fingerprint is final, so accepting
+    // this would permanently poison the signer's slot
+    let mut bad = unsigned.clone();
+    let junk_msg = Message::from_digest([9u8; 32]);
+    let account_path = DerivationPath::from_str(ACCOUNT_PATH).unwrap();
+    let account_xpriv = fixture
+        .xpriv
+        .derive_priv(&fixture.secp, &account_path)
+        .unwrap();
+    let child_priv = account_xpriv
+        .derive_priv(&fixture.secp, &DerivationPath::from_str("m/0/0").unwrap())
+        .unwrap();
+    let junk_sig = fixture
+        .secp
+        .sign_ecdsa(&junk_msg, &child_priv.to_priv().inner);
+    let pubkey = bitcoin::PublicKey::new(child_priv.to_priv().public_key(&fixture.secp).inner);
+    bad.inputs[0].partial_sigs.insert(
+        pubkey,
+        EcdsaSignature {
+            signature: junk_sig,
+            sighash_type: EcdsaSighashType::All,
+        },
+    );
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &bad),
+        Err(core_coordination::psbt::PsbtValidationError::InvalidPartialSignature(0))
+    ));
+}
+
+#[tokio::test]
+async fn non_sighash_all_submission_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // re-flag the (otherwise valid) SIGHASH_ALL signature as
+    // SIGHASH_SINGLE — if accepted and merged, the signed tx could be
+    // malleated after the signer approved it
+    let mut malleable = unsigned.clone();
+    for (pk, sig) in &signed.inputs[0].partial_sigs {
+        malleable.inputs[0].partial_sigs.insert(
+            *pk,
+            EcdsaSignature {
+                signature: sig.signature,
+                sighash_type: EcdsaSighashType::Single,
+            },
+        );
+    }
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &malleable),
+        Err(core_coordination::psbt::PsbtValidationError::NonSigHashAllSighash(0))
+    ));
+}

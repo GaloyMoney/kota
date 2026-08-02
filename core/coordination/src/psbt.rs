@@ -12,7 +12,9 @@
 //! stripped cosigner signatures, altered scripts — is rejected here, at the
 //! use-case layer, before any event is recorded.
 
-use bitcoin::Psbt;
+use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use bitcoin::{Psbt, secp256k1};
+use miniscript::psbt::PsbtExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PsbtValidationError {
@@ -32,6 +34,19 @@ pub enum PsbtValidationError {
          per fingerprint, so the first upload is final)"
     )]
     IncompleteSubmission(usize),
+    #[error("cannot compute sighash for input {index}: {reason}")]
+    SighashComputation { index: usize, reason: String },
+    #[error(
+        "partial signature at input {0} uses a non-SIGHASH_ALL sighash type; \
+         anything else would let the final transaction be malleated after signing"
+    )]
+    NonSigHashAllSighash(usize),
+    #[error(
+        "partial signature at input {0} failed cryptographic verification against the \
+         unsigned PSBT's sighash — accepting it would permanently brick this signer's \
+         slot (add_signature is idempotent per fingerprint, the first upload is final)"
+    )]
+    InvalidPartialSignature(usize),
 }
 
 pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
@@ -44,6 +59,19 @@ pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
 /// SIGHASH_ALL behavior); allowing a partially-signed upload would brick the
 /// session, because `add_signature` is idempotent per fingerprint and the
 /// first upload sticks.
+///
+/// Every *new* partial signature is additionally verified cryptographically:
+/// it must use `SIGHASH_ALL` and must verify against the sighash computed
+/// from the *original* (platform-built, trusted) PSBT — never from the
+/// submitted document, whose `witness_utxo`/`witness_script` fields are not
+/// yet asserted immutable. This closes two holes:
+///
+/// - a signer uploading garbage/invalid signatures would permanently poison
+///   their own slot (first upload is final), bricking any session whose
+///   threshold requires them — a one-upload grief;
+/// - a non-`SIGHASH_ALL` signature (`SIGHASH_NONE`, `SIGHASH_SINGLE`,
+///   `SIGHASH_ANYONECANPAY`) would let the transaction be malleated after
+///   the signer approved it.
 ///
 /// Returns the number of new partial signatures added across all inputs.
 ///
@@ -66,6 +94,9 @@ pub fn validate_signed_submission(
         return Err(PsbtValidationError::InputOutputCountMismatch);
     }
 
+    let secp = secp256k1::Secp256k1::verification_only();
+    let mut cache = SighashCache::new(&original.unsigned_tx);
+
     let mut added = 0usize;
     let mut all_inputs_signed = true;
     for (idx, (orig_in, signed_in)) in original.inputs.iter().zip(signed.inputs.iter()).enumerate()
@@ -76,7 +107,30 @@ pub fn validate_signed_submission(
                 _ => return Err(PsbtValidationError::PartialSignatureRemoved(idx)),
             }
         }
-        let added_here = signed_in.partial_sigs.len() - orig_in.partial_sigs.len();
+        let mut added_here = 0usize;
+        for (pk, sig) in &signed_in.partial_sigs {
+            if orig_in.partial_sigs.contains_key(pk) {
+                // already checked byte-equal against the original above
+                continue;
+            }
+            if sig.sighash_type != EcdsaSighashType::All {
+                return Err(PsbtValidationError::NonSigHashAllSighash(idx));
+            }
+            // Verify against the sighash of the *original* PSBT: the
+            // submitted document's utxo/script fields are attacker-
+            // controlled at this point, so a sighash derived from it
+            // would prove nothing about validity at finalization time.
+            let msg = original
+                .sighash_msg(idx, &mut cache, None)
+                .map_err(|e| PsbtValidationError::SighashComputation {
+                    index: idx,
+                    reason: e.to_string(),
+                })?
+                .to_secp_msg();
+            secp.verify_ecdsa(&msg, &sig.signature, &pk.inner)
+                .map_err(|_| PsbtValidationError::InvalidPartialSignature(idx))?;
+            added_here += 1;
+        }
         if added_here == 0 {
             all_inputs_signed = false;
         }
