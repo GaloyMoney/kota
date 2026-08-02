@@ -49,6 +49,16 @@ event-sourced PSBT signing-session lifecycle.
   Two `TODO(security)` items are flagged: binding new signatures to the
   submitter's fingerprint via bip32 key sources, and asserting immutability
   of non-signature PSBT fields.
+- **`wallet` module** — the bitcoin-side logic the PSBT-creation job runs:
+  `sortedmulti_wsh_descriptor` builds the `wsh(sortedmulti(NofM))`
+  descriptor from keystores, `build_unsigned_psbt` constructs the unsigned
+  PSBT from a `SpendSpec` + funding UTXOs (validates amounts balance,
+  fills `witness_utxo`/`witness_script`/`bip32_derivation` via
+  `rust-miniscript`), `descriptor_fingerprints` cross-checks a descriptor
+  against a session's policy.
+- **`storage` module** — the `BlobStore` content-addressed storage trait
+  (`put`/`get`/`delete` by hash) with an `InMemoryBlobStore` for tests;
+  GCS/local-filesystem backends to come.
 - **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `WalletId`)
   and `PsbtHash` (SHA-256 content address). PSBT/transaction blobs live in
   dumb content-addressed storage keyed by hash; the event log is the only
@@ -64,8 +74,14 @@ event-sourced PSBT signing-session lifecycle.
 
 ### Tests
 
-- 15 entity unit tests covering the state machine, idempotency guards,
+- 22 entity unit tests covering the state machine, idempotency guards,
   quorum validation, and reorg handling — no DB needed.
+- 3 end-to-end cryptographic tests (`core/coordination/tests/e2e_signing.rs`)
+  running the full flow with real keys: propose -> build unsigned PSBT
+  from the spec -> store/fetch by content hash -> sign with a real
+  `Xpriv` -> additive-only validation -> finalize -> ECDSA verification
+  of the witness against the funding script. Plus negative cases:
+  tampered unsigned tx and stripped cosigner signatures are rejected.
 - 1 repo round-trip integration test (`core/coordination/tests/`), skipped
   unless `DATABASE_URL` points at a migrated database.
 

@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 es-entity.workspace = true
 bitcoin.workspace = true
+miniscript.workspace = true
 serde.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

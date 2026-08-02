@@ -7,3 +7,5 @@
 pub mod primitives;
 pub mod psbt;
 pub mod psbt_session;
+pub mod storage;
+pub mod wallet;

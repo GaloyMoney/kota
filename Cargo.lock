@@ -272,6 +272,7 @@ dependencies = [
  "chrono",
  "derive_builder",
  "es-entity",
+ "miniscript",
  "serde",
  "serde_json",
  "sha2",
@@ -1064,6 +1065,16 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "miniscript"
+version = "12.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8343cc1ef1408bd9bdbf69f7aef47017dfab7e6349ec26fddf62e0e9fb5a4cf"
+dependencies = [
+ "bech32",
+ "bitcoin",
+]
 
 [[package]]
 name = "mio"

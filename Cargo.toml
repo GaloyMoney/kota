@@ -16,6 +16,7 @@ es-entity = { version = "0.11.11", features = [
     "instrument",
 ] }
 bitcoin = { version = "0.32", features = ["serde", "base64"] }
+miniscript = { version = "12" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 chrono = { version = "0.4.43", features = ["clock", "serde"] }
