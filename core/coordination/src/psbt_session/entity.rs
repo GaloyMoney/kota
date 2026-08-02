@@ -10,8 +10,8 @@ use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
-    FinalizationRecord, InvalidationReason, OutPointRef, PsbtSessionStatus, SignatureRecord,
-    SpendOutput,
+    ChangeOutput, FinalizationRecord, InvalidationReason, OutPointRef, PsbtSessionStatus,
+    SignatureRecord, SpendOutput,
 };
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub enum PsbtSessionEvent {
         inputs: Vec<OutPointRef>,
         outputs: Vec<SpendOutput>,
         fee_sats: u64,
-        change_output: Option<SpendOutput>,
+        change_output: Option<ChangeOutput>,
         threshold: u32,
         keystores: Vec<KeyFingerprint>,
         expires_at: DateTime<Utc>,
@@ -89,7 +89,7 @@ pub struct PsbtSession {
     pub inputs: Vec<OutPointRef>,
     pub outputs: Vec<SpendOutput>,
     pub fee_sats: u64,
-    pub change_output: Option<SpendOutput>,
+    pub change_output: Option<ChangeOutput>,
     #[builder(setter(strip_option), default)]
     unsigned_psbt_hash: Option<PsbtHash>,
     threshold: u32,
@@ -491,7 +491,7 @@ pub struct SpendSpec {
     pub inputs: Vec<OutPointRef>,
     pub outputs: Vec<SpendOutput>,
     pub fee_sats: u64,
-    pub change_output: Option<SpendOutput>,
+    pub change_output: Option<ChangeOutput>,
 }
 
 #[derive(Debug, Builder)]
@@ -503,7 +503,7 @@ pub struct NewPsbtSession {
     inputs: Vec<OutPointRef>,
     outputs: Vec<SpendOutput>,
     fee_sats: u64,
-    change_output: Option<SpendOutput>,
+    change_output: Option<ChangeOutput>,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
     expires_at: DateTime<Utc>,
@@ -628,9 +628,9 @@ mod tests {
                 amount_sats: 50_000,
             }],
             fee_sats: 500,
-            change_output: Some(SpendOutput {
-                address: "bc1qchange".to_string(),
+            change_output: Some(ChangeOutput {
                 amount_sats: 10_000,
+                derivation_index: 1,
             }),
         }
     }

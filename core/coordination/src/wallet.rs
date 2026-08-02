@@ -16,7 +16,7 @@ use bitcoin::{
 };
 use miniscript::ForEachKey;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
-use miniscript::psbt::PsbtInputExt;
+use miniscript::psbt::{PsbtExt, PsbtInputExt};
 
 use crate::psbt_session::{OutPointRef, SpendSpec};
 
@@ -40,6 +40,8 @@ pub enum WalletError {
     },
     #[error("WalletError - Psbt: {0}")]
     Psbt(String),
+    #[error("WalletError - OutputUpdate: {0}")]
+    OutputUpdate(#[from] miniscript::psbt::OutputUpdateError),
 }
 
 /// A wallet-owned coin being spent: the outpoint, its full `TxOut`
@@ -76,6 +78,12 @@ pub fn sortedmulti_wsh_descriptor(
 /// (inputs == outputs + change + fee), and fills each PSBT input with
 /// the witness data and bip32 key sources hardware wallets need:
 /// `witness_utxo`, `witness_script`, and `bip32_derivation`.
+///
+/// The change output's address is *derived* from the wallet descriptor
+/// at the spec's `derivation_index` — never accepted from the caller —
+/// and the change output's PSBT map is filled with `witness_script` and
+/// `bip32_derivation` so signing devices that verify multisig change
+/// have the key sources to do so.
 pub fn build_unsigned_psbt(
     spend: &SpendSpec,
     descriptor: &Descriptor<DescriptorPublicKey>,
@@ -106,7 +114,7 @@ pub fn build_unsigned_psbt(
 
     let mut tx_outputs = Vec::with_capacity(spend.outputs.len() + 1);
     let mut total_out = Amount::from_sat(spend.fee_sats);
-    for output in spend.outputs.iter().chain(spend.change_output.iter()) {
+    for output in &spend.outputs {
         let address = Address::from_str(&output.address)
             .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
             .require_network(network)
@@ -118,6 +126,24 @@ pub fn build_unsigned_psbt(
         });
     }
 
+    // Change is derived from the wallet descriptor, never accepted as an
+    // address from the caller: the coordinator is the one party that
+    // certainly holds the descriptor, and hardware wallets cannot be
+    // relied on to verify multisig change (many lack the storage for a
+    // registered wallet policy), so this must be enforced here.
+    let change_descriptor = spend
+        .change_output
+        .as_ref()
+        .map(|change| descriptor.at_derivation_index(change.derivation_index))
+        .transpose()?;
+    if let (Some(change), Some(change_desc)) = (&spend.change_output, &change_descriptor) {
+        total_out += Amount::from_sat(change.amount_sats);
+        tx_outputs.push(TxOut {
+            value: Amount::from_sat(change.amount_sats),
+            script_pubkey: change_desc.script_pubkey(),
+        });
+    }
+
     if total_in != total_out {
         return Err(WalletError::AmountMismatch {
             inputs_sats: total_in.to_sat(),
@@ -126,6 +152,7 @@ pub fn build_unsigned_psbt(
         });
     }
 
+    let n_outputs = tx_outputs.len();
     let tx = Transaction {
         version: Version::TWO,
         lock_time: absolute::LockTime::ZERO,
@@ -137,6 +164,14 @@ pub fn build_unsigned_psbt(
     for (idx, derived) in derived_descriptors.iter().enumerate() {
         psbt.inputs[idx].witness_utxo = Some(witness_utxos[idx].clone());
         psbt.inputs[idx].update_with_descriptor_unchecked(derived)?;
+    }
+
+    // Fill the change output's map with `witness_script` and
+    // `bip32_derivation` key sources (BIP-174 output fields) so signing
+    // devices that *can* verify multisig change have everything they
+    // need. Also cross-checks the derived script against the tx output.
+    if let Some(change_desc) = &change_descriptor {
+        psbt.update_output_with_descriptor(n_outputs - 1, change_desc)?;
     }
 
     Ok(psbt)

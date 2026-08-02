@@ -27,7 +27,10 @@ event-sourced PSBT signing-session lifecycle.
     and the session starts `Pending`; an async job builds the unsigned
     PSBT from the spec, uploads it to content-addressed storage, and
     appends `PsbtCreated` with the hash — only then does signature
-    collection open (`Collecting`).
+    collection open (`Collecting`). Change is specified as a descriptor
+    derivation index, not an address: the job derives the change address
+    from the wallet descriptor and fills the PSBT output map, since
+    signing devices cannot be relied on to verify multisig change.
   - Events: `Initialized`, `PsbtCreated`, `SignatureAdded`, `Finalized`,
     `BroadcastSeen`, `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
   - Two causality streams: user commands (signature collection, cancel,

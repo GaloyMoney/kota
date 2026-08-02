@@ -14,7 +14,8 @@ use core_coordination::{
     primitives::*,
     psbt::{parse_psbt, validate_signed_submission},
     psbt_session::{
-        NewPsbtSession, OutPointRef, Policy, PsbtSession, PsbtSessionStatus, SpendOutput, SpendSpec,
+        ChangeOutput, NewPsbtSession, OutPointRef, Policy, PsbtSession, PsbtSessionStatus,
+        SpendOutput, SpendSpec,
     },
     storage::{BlobStore, InMemoryBlobStore},
     wallet::{
@@ -95,11 +96,10 @@ impl Fixture {
             derivation_index: 0,
         }];
 
-        // destination and change addresses (both wallet-derived here; the
-        // destination would be external in a real spend — the tx is valid
-        // either way)
+        // destination (wallet-derived here; external in a real spend —
+        // the tx is valid either way). Change is not an address: the
+        // creation job derives it from the descriptor at the given index.
         let destination = descriptor.at_derivation_index(5).unwrap().script_pubkey();
-        let change = descriptor.at_derivation_index(1).unwrap().script_pubkey();
 
         let spec = SpendSpec {
             inputs: vec![OutPointRef {
@@ -113,11 +113,9 @@ impl Fixture {
                 amount_sats: 50_000,
             }],
             fee_sats: 500,
-            change_output: Some(SpendOutput {
-                address: bitcoin::Address::from_script(&change, NETWORK)
-                    .unwrap()
-                    .to_string(),
+            change_output: Some(ChangeOutput {
                 amount_sats: 49_500,
+                derivation_index: 1,
             }),
         };
 
@@ -196,6 +194,23 @@ async fn e2e_propose_create_sign_finalize() {
     assert!(signed_psbt.inputs[0].witness_script.is_some());
     assert!(
         signed_psbt.inputs[0]
+            .bip32_derivation
+            .values()
+            .any(|(fp, _)| *fp == fixture.fingerprint)
+    );
+
+    // the change output is wallet-derived (index 1) and carries the
+    // witness script + key sources a signing device needs to verify
+    // it belongs to the same multisig
+    let change_spk = fixture
+        .descriptor
+        .at_derivation_index(1)
+        .unwrap()
+        .script_pubkey();
+    assert_eq!(signed_psbt.unsigned_tx.output[1].script_pubkey, change_spk);
+    assert!(signed_psbt.outputs[1].witness_script.is_some());
+    assert!(
+        signed_psbt.outputs[1]
             .bip32_derivation
             .values()
             .any(|(fp, _)| *fp == fixture.fingerprint)

@@ -76,6 +76,22 @@ pub struct SpendOutput {
     pub amount_sats: u64,
 }
 
+/// Change returned to the wallet itself.
+///
+/// The address is deliberately *not* part of the spec: the PSBT-creation
+/// job derives it from the wallet descriptor at `derivation_index`, so a
+/// compromised caller cannot redirect the unspent remainder of the
+/// inputs. Signing devices cannot be relied on for this check — many
+/// hardware wallets lack the storage to keep a registered multisig
+/// policy on-device and therefore cannot verify change independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutput {
+    pub amount_sats: u64,
+    /// Derivation index on the wallet descriptor (change branch).
+    pub derivation_index: u32,
+}
+
 /// A collected signature: who signed, and where the signed PSBT blob lives.
 ///
 /// Collected is not the same as *used*: more signatures than the threshold
