@@ -40,10 +40,11 @@ event-sourced PSBT signing-session lifecycle.
   Two `TODO(security)` items are flagged: binding new signatures to the
   submitter's fingerprint via bip32 key sources, and asserting immutability
   of non-signature PSBT fields.
-- **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `WalletId`),
-  `PsbtHash` (SHA-256 content hash), `BlobRef` (object
-  storage reference). PSBT blobs are stored outside the event log; events
-  carry ref + hash only.
+- **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `WalletId`)
+  and `PsbtHash` (SHA-256 content address). PSBT/transaction blobs live in
+  dumb content-addressed storage keyed by hash; the event log is the only
+  index of which hashes exist and what they mean. Every fetch is
+  self-verifying (recompute the digest, compare).
 
 ### Persistence
 

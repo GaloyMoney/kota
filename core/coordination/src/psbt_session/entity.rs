@@ -6,7 +6,7 @@ use es_entity::*;
 use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
 use chrono::{DateTime, Utc};
 
-use crate::primitives::{BlobRef, PsbtHash, PsbtSessionId, WalletId};
+use crate::primitives::{PsbtHash, PsbtSessionId, WalletId};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
@@ -24,7 +24,6 @@ pub enum PsbtSessionEvent {
         /// spend. Anyone in the wallet can propose; proposers and
         /// signers are the same set of people (1-1 user/keystore).
         proposed_by: KeyFingerprint,
-        unsigned_psbt_ref: BlobRef,
         unsigned_psbt_hash: PsbtHash,
         threshold: u32,
         keystores: Vec<KeyFingerprint>,
@@ -35,7 +34,6 @@ pub enum PsbtSessionEvent {
     /// than the threshold may be collected.
     SignatureAdded {
         fingerprint: KeyFingerprint,
-        signed_psbt_ref: BlobRef,
         signed_psbt_hash: PsbtHash,
     },
     /// The final transaction was *recomputed* by the platform from the
@@ -43,7 +41,6 @@ pub enum PsbtSessionEvent {
     /// "whose signature authorized this spend?".
     Finalized {
         txid: Txid,
-        final_tx_ref: BlobRef,
         final_tx_hash: PsbtHash,
         sigs_used: Vec<KeyFingerprint>,
     },
@@ -73,7 +70,6 @@ pub struct PsbtSession {
     pub id: PsbtSessionId,
     pub wallet_id: WalletId,
     pub proposed_by: KeyFingerprint,
-    pub unsigned_psbt_ref: BlobRef,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
@@ -156,14 +152,13 @@ impl PsbtSession {
     /// Record a validated signed-PSBT submission.
     ///
     /// The use-case layer MUST run `crate::psbt::validate_signed_submission`
-    /// against the blob at `signed_psbt_ref` before calling this; the entity
+    /// against the blob at `signed_psbt_hash` before calling this; the entity
     /// only enforces policy membership and lifecycle state.
     ///
     /// Idempotent per signer: re-uploading after a crash/retry is a no-op.
     pub fn add_signature(
         &mut self,
         fingerprint: KeyFingerprint,
-        signed_psbt_ref: BlobRef,
         signed_psbt_hash: PsbtHash,
     ) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
@@ -179,12 +174,10 @@ impl PsbtSession {
 
         self.signatures.push(SignatureRecord {
             fingerprint,
-            signed_psbt_ref: signed_psbt_ref.clone(),
             signed_psbt_hash,
         });
         self.events.push(PsbtSessionEvent::SignatureAdded {
             fingerprint,
-            signed_psbt_ref,
             signed_psbt_hash,
         });
         Ok(Idempotent::Executed(()))
@@ -196,7 +189,6 @@ impl PsbtSession {
     pub fn finalize(
         &mut self,
         txid: Txid,
-        final_tx_ref: BlobRef,
         final_tx_hash: PsbtHash,
         mut sigs_used: Vec<KeyFingerprint>,
     ) -> Result<Idempotent<Txid>, PsbtSessionError> {
@@ -228,13 +220,11 @@ impl PsbtSession {
 
         self.finalization = Some(FinalizationRecord {
             txid,
-            final_tx_ref: final_tx_ref.clone(),
             final_tx_hash,
             sigs_used: sigs_used.clone(),
         });
         self.events.push(PsbtSessionEvent::Finalized {
             txid,
-            final_tx_ref,
             final_tx_hash,
             sigs_used,
         });
@@ -372,7 +362,6 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                     id,
                     wallet_id,
                     proposed_by,
-                    unsigned_psbt_ref,
                     unsigned_psbt_hash,
                     threshold,
                     keystores,
@@ -382,7 +371,6 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                         .id(*id)
                         .wallet_id(*wallet_id)
                         .proposed_by(*proposed_by)
-                        .unsigned_psbt_ref(unsigned_psbt_ref.clone())
                         .unsigned_psbt_hash(*unsigned_psbt_hash)
                         .threshold(*threshold)
                         .keystores(keystores.clone())
@@ -390,24 +378,20 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                 }
                 PsbtSessionEvent::SignatureAdded {
                     fingerprint,
-                    signed_psbt_ref,
                     signed_psbt_hash,
                 } => {
                     signatures.push(SignatureRecord {
                         fingerprint: *fingerprint,
-                        signed_psbt_ref: signed_psbt_ref.clone(),
                         signed_psbt_hash: *signed_psbt_hash,
                     });
                 }
                 PsbtSessionEvent::Finalized {
                     txid,
-                    final_tx_ref,
                     final_tx_hash,
                     sigs_used,
                 } => {
                     builder = builder.finalization(FinalizationRecord {
                         txid: *txid,
-                        final_tx_ref: final_tx_ref.clone(),
                         final_tx_hash: *final_tx_hash,
                         sigs_used: sigs_used.clone(),
                     });
@@ -438,7 +422,6 @@ pub struct NewPsbtSession {
     pub(super) id: PsbtSessionId,
     wallet_id: WalletId,
     proposed_by: KeyFingerprint,
-    unsigned_psbt_ref: BlobRef,
     unsigned_psbt_hash: PsbtHash,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
@@ -454,7 +437,6 @@ impl NewPsbtSession {
         id: PsbtSessionId,
         wallet_id: WalletId,
         proposed_by: KeyFingerprint,
-        unsigned_psbt_ref: BlobRef,
         unsigned_psbt_hash: PsbtHash,
         policy: Policy,
         expires_at: DateTime<Utc>,
@@ -485,7 +467,6 @@ impl NewPsbtSession {
             id,
             wallet_id,
             proposed_by,
-            unsigned_psbt_ref,
             unsigned_psbt_hash,
             threshold,
             keystores,
@@ -510,7 +491,6 @@ impl IntoEvents<PsbtSessionEvent> for NewPsbtSession {
                 id: self.id,
                 wallet_id: self.wallet_id,
                 proposed_by: self.proposed_by,
-                unsigned_psbt_ref: self.unsigned_psbt_ref,
                 unsigned_psbt_hash: self.unsigned_psbt_hash,
                 threshold: self.threshold,
                 keystores: self.keystores,
@@ -546,7 +526,6 @@ mod tests {
             PsbtSessionId::new(),
             WalletId::new(),
             fp(1),
-            BlobRef::new("psbt/unsigned/1"),
             PsbtHash::digest_of(b"unsigned-psbt"),
             Policy {
                 threshold,
@@ -565,7 +544,6 @@ mod tests {
     fn add_sig(session: &mut PsbtSession, byte: u8) -> Result<Idempotent<()>, PsbtSessionError> {
         session.add_signature(
             fp(byte),
-            BlobRef::new(format!("psbt/signed/{byte}")),
             PsbtHash::digest_of(format!("signed-psbt-{byte}").as_bytes()),
         )
     }
@@ -615,12 +593,7 @@ mod tests {
         let _ = add_sig(&mut session, 1).unwrap();
 
         // below threshold
-        let result = session.finalize(
-            dummy_txid(1),
-            BlobRef::new("tx/final/1"),
-            PsbtHash::digest_of(b"final-tx"),
-            vec![fp(1)],
-        );
+        let result = session.finalize(dummy_txid(1), PsbtHash::digest_of(b"final-tx"), vec![fp(1)]);
         assert!(matches!(
             result,
             Err(PsbtSessionError::ThresholdNotMet { .. })
@@ -629,7 +602,6 @@ mod tests {
         // sigs_used must be collected
         let result = session.finalize(
             dummy_txid(1),
-            BlobRef::new("tx/final/1"),
             PsbtHash::digest_of(b"final-tx"),
             vec![fp(1), fp(2)],
         );
@@ -648,7 +620,6 @@ mod tests {
 
         let result = session.finalize(
             dummy_txid(1),
-            BlobRef::new("tx/final/1"),
             PsbtHash::digest_of(b"final-tx"),
             vec![fp(2), fp(3)],
         );
@@ -668,7 +639,6 @@ mod tests {
         let _ = session
             .finalize(
                 dummy_txid(1),
-                BlobRef::new("tx/final/1"),
                 PsbtHash::digest_of(b"final-tx"),
                 vec![fp(1), fp(2)],
             )
@@ -676,7 +646,6 @@ mod tests {
 
         let result = session.finalize(
             dummy_txid(1),
-            BlobRef::new("tx/final/1"),
             PsbtHash::digest_of(b"final-tx"),
             vec![fp(1), fp(2)],
         );
@@ -691,7 +660,6 @@ mod tests {
         let _ = session
             .finalize(
                 dummy_txid(1),
-                BlobRef::new("tx/final/1"),
                 PsbtHash::digest_of(b"final-tx"),
                 vec![fp(1), fp(2)],
             )
@@ -716,12 +684,7 @@ mod tests {
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
         let _ = session
-            .finalize(
-                txid,
-                BlobRef::new("tx/final/1"),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
+            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
             .unwrap();
 
         // txid mismatch is rejected — chain events must match the final tx
@@ -755,12 +718,7 @@ mod tests {
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
         let _ = session
-            .finalize(
-                txid,
-                BlobRef::new("tx/final/1"),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
+            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
             .unwrap();
         let _ = session.confirm(txid, 800_000, dummy_block_hash(1)).unwrap();
 
@@ -781,12 +739,7 @@ mod tests {
         let _ = add_sig(&mut session, 2).unwrap();
         let txid = dummy_txid(1);
         let _ = session
-            .finalize(
-                txid,
-                BlobRef::new("tx/final/1"),
-                PsbtHash::digest_of(b"final-tx"),
-                vec![fp(1), fp(2)],
-            )
+            .finalize(txid, PsbtHash::digest_of(b"final-tx"), vec![fp(1), fp(2)])
             .unwrap();
         let _ = session.mark_broadcast_seen(txid).unwrap();
         let _ = session.confirm(txid, 800_000, dummy_block_hash(1)).unwrap();
@@ -867,7 +820,6 @@ mod tests {
         let _ = session
             .finalize(
                 dummy_txid(1),
-                BlobRef::new("tx/final/1"),
                 PsbtHash::digest_of(b"final-tx"),
                 vec![fp(1), fp(2)],
             )
@@ -881,7 +833,6 @@ mod tests {
         let _ = session
             .finalize(
                 dummy_txid(1),
-                BlobRef::new("tx/final/1"),
                 PsbtHash::digest_of(b"final-tx"),
                 vec![fp(1), fp(2)],
             )
@@ -905,7 +856,6 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 fp(1),
-                BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
                 policy(0, signers.clone()),
                 expires_at(),
@@ -917,7 +867,6 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 fp(1),
-                BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
                 policy(3, signers),
                 expires_at(),
@@ -929,7 +878,6 @@ mod tests {
                 PsbtSessionId::new(),
                 WalletId::new(),
                 fp(1),
-                BlobRef::new("psbt/unsigned/1"),
                 PsbtHash::digest_of(b"x"),
                 policy(1, vec![fp(1), fp(1)]),
                 expires_at(),

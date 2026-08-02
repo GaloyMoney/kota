@@ -28,7 +28,6 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
         PsbtSessionId::new(),
         WalletId::new(),
         fp(1),
-        BlobRef::new("psbt/unsigned/1"),
         PsbtHash::digest_of(b"unsigned-psbt"),
         Policy {
             threshold: 2,
@@ -41,11 +40,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
     assert_eq!(session.status(), PsbtSessionStatus::Collecting);
 
     session
-        .add_signature(
-            fp(1),
-            BlobRef::new("psbt/signed/1"),
-            PsbtHash::digest_of(b"signed-psbt-1"),
-        )?
+        .add_signature(fp(1), PsbtHash::digest_of(b"signed-psbt-1"))?
         .unwrap();
 
     let persisted = repo.update(&mut session).await?;

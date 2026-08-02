@@ -2,7 +2,7 @@ use bitcoin::{Txid, bip32::Fingerprint as KeyFingerprint};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
-use crate::primitives::{BlobRef, PsbtHash};
+use crate::primitives::PsbtHash;
 
 /// Lifecycle status, derived by folding the event stream.
 ///
@@ -62,7 +62,6 @@ pub enum InvalidationReason {
 #[serde(rename_all = "camelCase")]
 pub struct SignatureRecord {
     pub fingerprint: KeyFingerprint,
-    pub signed_psbt_ref: BlobRef,
     pub signed_psbt_hash: PsbtHash,
 }
 
@@ -70,7 +69,6 @@ pub struct SignatureRecord {
 #[serde(rename_all = "camelCase")]
 pub struct FinalizationRecord {
     pub txid: Txid,
-    pub final_tx_ref: BlobRef,
     pub final_tx_hash: PsbtHash,
     pub sigs_used: Vec<KeyFingerprint>,
 }

@@ -6,12 +6,18 @@ es_entity::entity_id! {
     WalletId;
 }
 
-/// Content hash (SHA-256) of a serialized PSBT or final transaction blob.
+/// Content address (SHA-256) of a PSBT or final-transaction blob.
 ///
-/// Blobs live in object storage; events carry only this hash plus a
-/// [`BlobRef`]. The hash is the audit anchor: anyone holding the blob can
-/// prove it is exactly what the event refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Blobs live in dumb content-addressed storage (GCS in deployed envs, local
+/// filesystem in dev): `put(hash, bytes)` / `get(hash)` / `delete(hash)`.
+/// The storage layer has no logic of its own — the event log is the only
+/// index of which hashes exist and what they mean, and lifecycle decisions
+/// (e.g. deleting blobs for a wallet) are driven by scanning events, never
+/// by listing the bucket.
+///
+/// Because the hash is both the key and the integrity anchor, every fetch
+/// is self-verifying: recompute the digest and compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PsbtHash([u8; 32]);
 
 impl PsbtHash {
@@ -25,42 +31,30 @@ impl PsbtHash {
 
 impl std::fmt::Display for PsbtHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
-// Minimal hex encoding to avoid a hex crate dependency for Display.
-mod hex {
-    pub fn encode(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-}
-
-/// Reference to a blob (PSBT / raw transaction) in object storage.
-///
-/// PSBTs are documents, not values — they are too large and too sensitive
-/// to embed in events. The platform stores them in object storage with
-/// lifecycle controls (crypto-shredding on data-deletion requests) while
-/// the event log keeps the immutable hash-chained reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlobRef(String);
-
-impl BlobRef {
-    pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
-    }
-}
-
-impl std::fmt::Display for BlobRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::str::FromStr for BlobRef {
-    type Err = std::convert::Infallible;
+impl std::str::FromStr for PsbtHash {
+    type Err = PsbtHashParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_string()))
+        if s.len() != 64 {
+            return Err(PsbtHashParseError);
+        }
+        let mut inner = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let hi = (chunk[0] as char).to_digit(16).ok_or(PsbtHashParseError)?;
+            let lo = (chunk[1] as char).to_digit(16).ok_or(PsbtHashParseError)?;
+            inner[i] = ((hi << 4) | lo) as u8;
+        }
+        Ok(Self(inner))
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid psbt hash: expected 64 lowercase hex characters")]
+pub struct PsbtHashParseError;
