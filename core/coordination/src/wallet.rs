@@ -7,6 +7,12 @@
 //!
 //! Plain `sortedmulti` only — no miniscript spending conditions.
 
+mod entity;
+pub mod repo;
+
+pub use entity::{NewWallet, Wallet, WalletEvent};
+pub use repo::WalletRepo;
+
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
 use bitcoin::{
     Amount, Network, OutPoint, Psbt, Sequence, Transaction, TxIn, TxOut, absolute,
@@ -16,6 +22,7 @@ use miniscript::ForEachKey;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 use miniscript::psbt::PsbtExt;
 
+use crate::primitives::DescriptorFingerprint;
 use crate::psbt_session::{OutPointRef, SpendSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,11 +72,46 @@ impl From<&OutPointRef> for OutPoint {
 
 /// Build a `wsh(sortedmulti(NofM))` descriptor from the policy's
 /// keystores (xpubs with origin info, i.e. Sparrow `Keystore`s).
+///
+/// Keystores are sorted by their string form before construction:
+/// `sortedmulti` sorts keys in the *script* but preserves import order
+/// in the descriptor *string*, so without this canonicalization two
+/// logically identical wallets would produce different descriptors —
+/// and therefore different `descriptor_fingerprint`s.
 pub fn sortedmulti_wsh_descriptor(
     threshold: usize,
-    keystores: Vec<DescriptorPublicKey>,
+    mut keystores: Vec<DescriptorPublicKey>,
 ) -> Result<Descriptor<DescriptorPublicKey>, WalletError> {
+    keystores.sort_by_key(|k| k.to_string());
     Ok(Descriptor::new_wsh_sortedmulti(threshold, keystores)?)
+}
+
+/// Content address of a wallet: SHA-256 of the network and the
+/// canonical descriptor string.
+///
+/// Canonicalization: the descriptor's own `Display` form minus the
+/// `#checksum` suffix (the checksum is derived data, not identity).
+/// Descriptors built via `sortedmulti_wsh_descriptor` are additionally
+/// order-canonicalized at construction, so cosigner import order does
+/// not affect the fingerprint; the network does (same xpubs, different
+/// network, different wallet).
+///
+/// Deterministic by design — re-importing the same wallet yields the
+/// same fingerprint, which `core_wallets.descriptor_fingerprint`
+/// enforces with a UNIQUE constraint for idempotent creation. Note the
+/// preimage is known-plaintext: anyone who learns the descriptor can
+/// compute the fingerprint. Fine as an internal DB key; if it is ever
+/// exposed externally, switch to an HMAC keyed by an instance secret.
+pub fn descriptor_fingerprint(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+    network: Network,
+) -> DescriptorFingerprint {
+    let string = descriptor.to_string();
+    let canonical = string
+        .split_once('#')
+        .map(|(body, _)| body)
+        .unwrap_or(&string);
+    DescriptorFingerprint::digest_of(format!("{network}:{canonical}").as_bytes())
 }
 
 /// Build the unsigned PSBT for a spend.
@@ -204,4 +246,100 @@ pub fn descriptor_fingerprints(
         true
     });
     fingerprints
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use bitcoin::secp256k1::Secp256k1;
+    use miniscript::descriptor::{DescriptorXKey, Wildcard};
+    use std::str::FromStr;
+
+    const NETWORK: Network = Network::Regtest;
+
+    fn keystore(seed: u8) -> DescriptorPublicKey {
+        let secp = Secp256k1::new();
+        let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
+        let account_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+        let account_xpriv = xpriv.derive_priv(&secp, &account_path).unwrap();
+        DescriptorPublicKey::XPub(DescriptorXKey {
+            origin: Some((xpriv.fingerprint(&secp), account_path)),
+            xkey: Xpub::from_priv(&secp, &account_xpriv),
+            derivation_path: DerivationPath::from_str("m/0").unwrap(),
+            wildcard: Wildcard::Unhardened,
+        })
+    }
+
+    fn two_of_three() -> Descriptor<DescriptorPublicKey> {
+        sortedmulti_wsh_descriptor(2, vec![keystore(1), keystore(2), keystore(3)]).unwrap()
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic() {
+        assert_eq!(
+            descriptor_fingerprint(&two_of_three(), NETWORK),
+            descriptor_fingerprint(&two_of_three(), NETWORK),
+        );
+    }
+
+    #[test]
+    fn fingerprint_depends_on_network() {
+        let descriptor = two_of_three();
+        assert_ne!(
+            descriptor_fingerprint(&descriptor, Network::Testnet),
+            descriptor_fingerprint(&descriptor, Network::Signet),
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_checksum_suffix() {
+        let with_checksum = two_of_three().to_string();
+        let without_checksum = with_checksum.split_once('#').unwrap().0.to_string();
+
+        let parsed_with: Descriptor<DescriptorPublicKey> = with_checksum.parse().unwrap();
+        let parsed_without: Descriptor<DescriptorPublicKey> = without_checksum.parse().unwrap();
+
+        assert_eq!(
+            descriptor_fingerprint(&parsed_with, NETWORK),
+            descriptor_fingerprint(&parsed_without, NETWORK),
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_cosigner_import_order() {
+        let forward =
+            sortedmulti_wsh_descriptor(2, vec![keystore(1), keystore(2), keystore(3)]).unwrap();
+        let reverse =
+            sortedmulti_wsh_descriptor(2, vec![keystore(3), keystore(2), keystore(1)]).unwrap();
+        assert_eq!(
+            descriptor_fingerprint(&forward, NETWORK),
+            descriptor_fingerprint(&reverse, NETWORK),
+        );
+    }
+
+    #[test]
+    fn fingerprint_depends_on_threshold() {
+        let two =
+            sortedmulti_wsh_descriptor(2, vec![keystore(1), keystore(2), keystore(3)]).unwrap();
+        let three =
+            sortedmulti_wsh_descriptor(3, vec![keystore(1), keystore(2), keystore(3)]).unwrap();
+        assert_ne!(
+            descriptor_fingerprint(&two, NETWORK),
+            descriptor_fingerprint(&three, NETWORK),
+        );
+    }
+
+    #[test]
+    fn new_wallet_records_canonical_descriptor_and_fingerprint() {
+        use es_entity::{IntoEvents, TryFromEvents};
+
+        let descriptor = two_of_three();
+        let new_wallet = NewWallet::new(crate::primitives::WalletId::new(), &descriptor, NETWORK);
+        let expected_fingerprint = descriptor_fingerprint(&descriptor, NETWORK);
+
+        let wallet = Wallet::try_from_events(new_wallet.into_events()).unwrap();
+        assert_eq!(wallet.descriptor(), descriptor.to_string());
+        assert_eq!(wallet.descriptor_fingerprint(), expected_fingerprint);
+    }
 }
