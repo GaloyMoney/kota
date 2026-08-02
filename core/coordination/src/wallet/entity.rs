@@ -23,9 +23,11 @@ use crate::primitives::{DescriptorFingerprint, WalletId};
 pub enum WalletEvent {
     Initialized {
         id: WalletId,
-        /// Canonical descriptor string (with `#checksum`), as produced
-        /// by `Descriptor::to_string()`.
-        descriptor: String,
+        /// The wallet's descriptor. Parsed at the boundary
+        /// (`NewWallet::new`), so malformed descriptors never enter the
+        /// event stream; serde keeps the canonical string form, so the
+        /// persisted representation is the standard BIP-380 text.
+        descriptor: Descriptor<DescriptorPublicKey>,
         /// Content address of (network, canonical descriptor). See
         /// `crate::wallet::descriptor_fingerprint`.
         descriptor_fingerprint: DescriptorFingerprint,
@@ -36,13 +38,13 @@ pub enum WalletEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Wallet {
     pub id: WalletId,
-    pub descriptor: String,
+    pub descriptor: Descriptor<DescriptorPublicKey>,
     pub descriptor_fingerprint: DescriptorFingerprint,
     events: EntityEvents<WalletEvent>,
 }
 
 impl Wallet {
-    pub fn descriptor(&self) -> &str {
+    pub fn descriptor(&self) -> &Descriptor<DescriptorPublicKey> {
         &self.descriptor
     }
 
@@ -76,7 +78,7 @@ impl TryFromEvents<WalletEvent> for Wallet {
 pub struct NewWallet {
     #[builder(setter(into))]
     pub(super) id: WalletId,
-    descriptor: String,
+    descriptor: Descriptor<DescriptorPublicKey>,
     descriptor_fingerprint: DescriptorFingerprint,
 }
 
@@ -95,7 +97,7 @@ impl NewWallet {
     ) -> Self {
         Self {
             id,
-            descriptor: descriptor.to_string(),
+            descriptor: descriptor.clone(),
             descriptor_fingerprint: super::descriptor_fingerprint(descriptor, network),
         }
     }

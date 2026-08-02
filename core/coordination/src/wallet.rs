@@ -339,7 +339,31 @@ mod tests {
         let expected_fingerprint = descriptor_fingerprint(&descriptor, NETWORK);
 
         let wallet = Wallet::try_from_events(new_wallet.into_events()).unwrap();
-        assert_eq!(wallet.descriptor(), descriptor.to_string());
+        assert_eq!(wallet.descriptor(), &descriptor);
         assert_eq!(wallet.descriptor_fingerprint(), expected_fingerprint);
+    }
+
+    #[test]
+    fn descriptor_serializes_as_canonical_string() {
+        // miniscript's serde impl uses the Display/FromStr string form —
+        // the persisted event JSON is the standard BIP-380 text, not a
+        // JSON structure.
+        let descriptor = two_of_three();
+        let event = crate::wallet::WalletEvent::Initialized {
+            id: crate::primitives::WalletId::new(),
+            descriptor_fingerprint: descriptor_fingerprint(&descriptor, NETWORK),
+            descriptor: descriptor.clone(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json["descriptor"],
+            serde_json::json!(descriptor.to_string())
+        );
+
+        let round_tripped: crate::wallet::WalletEvent = serde_json::from_value(json).unwrap();
+        let crate::wallet::WalletEvent::Initialized {
+            descriptor: parsed, ..
+        } = round_tripped;
+        assert_eq!(parsed, descriptor);
     }
 }

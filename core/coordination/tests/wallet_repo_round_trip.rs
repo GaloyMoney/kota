@@ -35,6 +35,14 @@ async fn create_find_and_duplicate_round_trip() -> anyhow::Result<()> {
         return Ok(());
     };
     let pool = sqlx::PgPool::connect(&database_url).await?;
+    // deterministic keystores => deterministic fingerprint; reset so
+    // repeated runs against a persistent dev DB don't collide
+    sqlx::query("DELETE FROM core_wallet_events")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM core_wallets")
+        .execute(&pool)
+        .await?;
     let (clock, _ctrl) = ClockHandle::manual();
     let repo = WalletRepo::new(&pool, clock);
 
@@ -46,7 +54,7 @@ async fn create_find_and_duplicate_round_trip() -> anyhow::Result<()> {
         .create(NewWallet::new(WalletId::new(), &descriptor, NETWORK))
         .await?;
     assert_eq!(wallet.descriptor_fingerprint(), fingerprint);
-    assert_eq!(wallet.descriptor(), descriptor.to_string());
+    assert_eq!(wallet.descriptor(), &descriptor);
 
     let found = repo.find_by_descriptor_fingerprint(fingerprint).await?;
     assert_eq!(found.id, wallet.id);
