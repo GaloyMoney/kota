@@ -202,11 +202,14 @@ impl PsbtSession {
     /// Record a validated signed-PSBT submission.
     ///
     /// The use-case layer MUST run `crate::psbt::validate_signed_submission`
-    /// against the blob at `signed_psbt_hash` before calling this; the entity
-    /// only enforces policy membership and lifecycle state. That validation
-    /// also enforces completeness (every input signed) — the first upload per
-    /// fingerprint is final, so a partially-signed PSBT must never be
-    /// accepted.
+    /// (with the uploader's authenticated keystore fingerprint) against the
+    /// original unsigned PSBT and the submitted blob, then persist the
+    /// result of `crate::psbt::merge_partial_sigs` — the original document
+    /// plus the extracted signatures — and pass *that* blob's hash as
+    /// `signed_psbt_hash`. The entity only enforces policy membership and
+    /// lifecycle state. Validation also enforces completeness (every input
+    /// signed) — the first upload per fingerprint is final, so a
+    /// partially-signed PSBT must never be accepted.
     ///
     /// Idempotent per signer: re-uploading after a crash/retry is a no-op.
     pub fn add_signature(

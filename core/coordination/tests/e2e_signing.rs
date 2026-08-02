@@ -12,7 +12,7 @@
 
 use core_coordination::{
     primitives::*,
-    psbt::{parse_psbt, validate_signed_submission},
+    psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission},
     psbt_session::{
         ChangeOutput, NewPsbtSession, OutPointRef, Policy, PsbtSession, PsbtSessionStatus,
         SpendOutput, SpendSpec,
@@ -224,10 +224,14 @@ async fn e2e_propose_create_sign_finalize() {
         .unwrap();
     assert_eq!(signed_psbt.inputs[0].partial_sigs.len(), 1);
 
-    // --- 4. platform validates the submission is additive-only ---
-    let added = validate_signed_submission(&original, &signed_psbt).unwrap();
-    assert_eq!(added, 1);
-    let signed_hash = store.put(&signed_psbt.serialize()).await;
+    // --- 4. platform validates the submission, rebuilds the merged PSBT ---
+    let extracted =
+        validate_signed_submission(&original, &signed_psbt, &fixture.fingerprint).unwrap();
+    assert_eq!(extracted.len(), 1);
+    // the platform never stores or finalizes the submitted document — only
+    // the original plus the validated, extracted signatures
+    let merged_psbt = merge_partial_sigs(&original, &extracted);
+    let signed_hash = store.put(&merged_psbt.serialize()).await;
     assert!(
         session
             .add_signature(fixture.fingerprint, signed_hash)
@@ -238,7 +242,7 @@ async fn e2e_propose_create_sign_finalize() {
 
     // --- 5. finalize: platform combines, finalizes, extracts ---
     use miniscript::psbt::PsbtExt;
-    let final_psbt = signed_psbt
+    let final_psbt = merged_psbt
         .finalize(&fixture.secp)
         .map_err(|(_, errors)| errors)
         .unwrap();
@@ -325,7 +329,7 @@ async fn tampered_submission_is_rejected() {
     tampered.unsigned_tx.output[0].value = Amount::from_sat(99_000);
 
     assert!(matches!(
-        validate_signed_submission(&unsigned_psbt, &tampered),
+        validate_signed_submission(&unsigned_psbt, &tampered, &fixture.fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::UnsignedTxModified)
     ));
 }
@@ -355,7 +359,7 @@ async fn removed_cosigner_signature_is_rejected() {
     stripped.inputs[0].partial_sigs.clear();
 
     assert!(matches!(
-        validate_signed_submission(&signed, &stripped),
+        validate_signed_submission(&signed, &stripped, &fixture.fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::PartialSignatureRemoved(0))
     ));
 }
@@ -427,7 +431,13 @@ async fn partial_multi_input_submission_is_rejected() {
         .sign(&xpriv, &secp)
         .map_err(|(_, errors)| errors)
         .unwrap();
-    assert_eq!(validate_signed_submission(&unsigned, &complete).unwrap(), 2);
+    let fingerprint = descriptor_fingerprints(&descriptor)[0];
+    assert_eq!(
+        validate_signed_submission(&unsigned, &complete, &fingerprint)
+            .unwrap()
+            .len(),
+        2
+    );
 
     // a submission that signs only input 0 must be rejected: with
     // per-fingerprint idempotency the first upload sticks, so accepting
@@ -435,7 +445,7 @@ async fn partial_multi_input_submission_is_rejected() {
     let mut partial = unsigned.clone();
     partial.inputs[0].partial_sigs = complete.inputs[0].partial_sigs.clone();
     assert!(matches!(
-        validate_signed_submission(&unsigned, &partial),
+        validate_signed_submission(&unsigned, &partial, &fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::IncompleteSubmission(1))
     ));
 }
@@ -478,7 +488,7 @@ async fn invalid_partial_signature_is_rejected() {
     );
 
     assert!(matches!(
-        validate_signed_submission(&unsigned, &bad),
+        validate_signed_submission(&unsigned, &bad, &fixture.fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::InvalidPartialSignature(0))
     ));
 }
@@ -516,7 +526,147 @@ async fn non_sighash_all_submission_is_rejected() {
     }
 
     assert!(matches!(
-        validate_signed_submission(&unsigned, &malleable),
+        validate_signed_submission(&unsigned, &malleable, &fixture.fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::NonSigHashAllSighash(0))
+    ));
+}
+
+#[tokio::test]
+async fn smuggled_cosigner_signature_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // the signature is cryptographically valid, but the uploader claims a
+    // *different* keystore fingerprint — e.g. someone re-uploading a
+    // cosigner's blob as their own to corrupt the audit trail
+    let impostor = KeyFingerprint::from([0xAB; 4]);
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &impostor),
+        Err(core_coordination::psbt::PsbtValidationError::SignatureNotBoundToSigner { .. })
+    ));
+
+    // and a signature under a pubkey that is not a wallet keystore at all
+    let mut foreign = unsigned.clone();
+    let foreign_key =
+        bitcoin::PublicKey::new(secp256k1::PublicKey::from_slice(&[2u8; 33]).unwrap());
+    foreign.inputs[0].partial_sigs.insert(
+        foreign_key,
+        EcdsaSignature {
+            signature: signed.inputs[0]
+                .partial_sigs
+                .values()
+                .next()
+                .unwrap()
+                .signature,
+            sighash_type: EcdsaSighashType::All,
+        },
+    );
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &foreign, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::SignatureNotBoundToSigner { .. })
+    ));
+}
+
+#[tokio::test]
+async fn tampered_witness_utxo_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // shrink the witness_utxo amount — if this reached finalization it
+    // would change every cosigner's sighash context
+    signed.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(1);
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::InputFieldModified(0))
+    ));
+}
+
+#[tokio::test]
+async fn tampered_output_map_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // strip the change output's witness script — the data signing devices
+    // use to verify the change belongs to the wallet
+    signed.outputs[1].witness_script = None;
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::OutputFieldModified(1))
+    ));
+}
+
+#[tokio::test]
+async fn added_global_field_is_rejected() {
+    let fixture = Fixture::new();
+
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    let mut signed = unsigned.clone();
+    signed
+        .sign(&fixture.xpriv, &fixture.secp)
+        .map_err(|(_, errors)| errors)
+        .unwrap();
+
+    // signer software decorating the PSBT with extra global fields is
+    // rejected outright — only extracted signatures may cross the boundary
+    signed.proprietary.insert(
+        bitcoin::psbt::raw::ProprietaryKey {
+            prefix: b"evil".to_vec(),
+            subtype: 0,
+            key: vec![],
+        },
+        vec![1, 2, 3],
+    );
+
+    assert!(matches!(
+        validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
+        Err(core_coordination::psbt::PsbtValidationError::GlobalFieldModified)
     ));
 }
