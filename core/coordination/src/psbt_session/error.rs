@@ -60,6 +60,10 @@ pub enum PsbtSessionError {
          stranding the session"
     )]
     DustOutput { amount_sats: u64, dust_sats: u64 },
+    #[error("PsbtSessionError - TooManyInputs: {count} inputs exceeds the {max} cap")]
+    TooManyInputs { count: usize, max: usize },
+    #[error("PsbtSessionError - TooManyOutputs: {count} outputs exceeds the {max} cap")]
+    TooManyOutputs { count: usize, max: usize },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,
