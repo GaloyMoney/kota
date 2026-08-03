@@ -45,7 +45,7 @@
           shellHook = ''
             # Scoped to this directory by direnv — overrides any DATABASE_URL
             # leaked from other projects' shells.
-            export DATABASE_URL="postgres://user:password@127.0.0.1:5441/multisig"
+            export DATABASE_URL="postgres://user:password@127.0.0.1:5441/kota"
           '';
         };
 

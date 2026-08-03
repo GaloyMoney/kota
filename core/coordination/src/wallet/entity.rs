@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use bitcoin::Network;
+use bitcoin::bip32::Fingerprint as KeyFingerprint;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 
 use super::primitives::WalletStatus;
@@ -163,6 +164,16 @@ impl Wallet {
             .into_iter()
             .map(|(_, keystore)| keystore)
             .collect()
+    }
+
+    /// The master fingerprint of the keystore a participant submitted,
+    /// if any — the lookup behind the signer ↔ keystore binding (the
+    /// use-case layer decides what an absent binding means).
+    pub fn keystore_fingerprint_of(&self, user: UserId) -> Option<KeyFingerprint> {
+        self.submissions()
+            .into_iter()
+            .find(|(participant, _)| *participant == user)
+            .map(|(_, keystore)| keystore_fingerprint(&keystore))
     }
 
     /// Participants who have not (currently) submitted a keystore.
@@ -536,6 +547,25 @@ mod tests {
             Err(WalletError::NotAParticipant(_))
         ));
         assert_eq!(wallet.keystores().len(), 0);
+    }
+
+    #[test]
+    fn keystore_fingerprint_of_binds_participant_to_key() {
+        let (mut wallet, participants) = new_wallet();
+        assert_eq!(wallet.keystore_fingerprint_of(participants[0]), None);
+
+        let _ = wallet.add_keystore(keystore(1), participants[0]).unwrap();
+        assert_eq!(
+            wallet.keystore_fingerprint_of(participants[0]),
+            Some(keystore_fingerprint(&keystore(1)))
+        );
+        assert_eq!(wallet.keystore_fingerprint_of(participants[1]), None);
+
+        // after removal the binding is gone again
+        let _ = wallet
+            .remove_keystore(participants[0], participants[0])
+            .unwrap();
+        assert_eq!(wallet.keystore_fingerprint_of(participants[0]), None);
     }
 
     #[test]

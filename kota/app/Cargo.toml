@@ -1,5 +1,5 @@
 [package]
-name = "core-coordination"
+name = "kota-app"
 version.workspace = true
 edition.workspace = true
 
@@ -7,22 +7,17 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+core-coordination = { path = "../../core/coordination" }
 es-entity.workspace = true
-job.workspace = true
-async-trait.workspace = true
 bitcoin.workspace = true
 miniscript.workspace = true
-serde.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-derive_builder.workspace = true
 uuid.workspace = true
-strum.workspace = true
 sqlx.workspace = true
-sha2.workspace = true
 tracing.workspace = true
+job.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 anyhow = "1.0"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }

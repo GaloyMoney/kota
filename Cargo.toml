@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core/coordination"]
+members = ["core/coordination", "kota/app"]
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [] }
@@ -31,6 +31,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "chrono",
     "uuid",
+    "migrate",
 ] }
 sha2 = "0.11"
 tracing = "0.1.44"

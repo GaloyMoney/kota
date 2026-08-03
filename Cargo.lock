@@ -1146,6 +1146,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kota-app"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "chrono",
+ "core-coordination",
+ "es-entity",
+ "job",
+ "miniscript",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

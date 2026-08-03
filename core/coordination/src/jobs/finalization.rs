@@ -87,12 +87,12 @@ pub async fn run_finalization(
     Err(JobsError::CannotFinalize)
 }
 
-/// Fetch and parse a PSBT blob. Content-addressed fetch is
-/// self-verifying (the key is the content digest); a missing blob for
-/// an event-log-referenced hash is a storage-integrity error, not a
-/// routine miss.
+/// Fetch and parse a PSBT blob, verified against its content address
+/// (see [`crate::storage::fetch_verified`]): a missing or
+/// digest-mismatched blob for an event-log-referenced hash is a
+/// storage-integrity error, not a routine miss.
 async fn load_psbt(blobs: &impl BlobStore, hash: PsbtHash) -> Result<Psbt, JobsError> {
-    let bytes = blobs.get(&hash).await.ok_or(JobsError::BlobMissing(hash))?;
+    let bytes = crate::storage::fetch_verified(blobs, &hash).await?;
     Ok(psbt::parse_psbt(&bytes)?)
 }
 
