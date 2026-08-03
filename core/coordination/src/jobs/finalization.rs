@@ -88,11 +88,16 @@ pub async fn run_finalization(
 }
 
 /// Fetch and parse a PSBT blob. Content-addressed fetch is
-/// self-verifying (the key is the content digest); a missing blob for
-/// an event-log-referenced hash is a storage-integrity error, not a
-/// routine miss.
+/// self-verifying *by recompute-and-compare*: a missing blob for an
+/// event-log-referenced hash is a storage-integrity error, and so are
+/// bytes that do not hash to the address they were fetched under (a
+/// corrupt or misconfigured backend is indistinguishable from
+/// tampering at this layer).
 async fn load_psbt(blobs: &impl BlobStore, hash: PsbtHash) -> Result<Psbt, JobsError> {
     let bytes = blobs.get(&hash).await.ok_or(JobsError::BlobMissing(hash))?;
+    if PsbtHash::digest_of(&bytes) != hash {
+        return Err(JobsError::BlobIntegrity(hash));
+    }
     Ok(psbt::parse_psbt(&bytes)?)
 }
 
@@ -180,5 +185,80 @@ where
             }
             Err(e) => Err(Box::new(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::InMemoryBlobStore;
+    use bitcoin::hashes::Hash;
+    use bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
+        transaction::Version,
+    };
+
+    fn some_psbt_bytes() -> Vec<u8> {
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([7; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        Psbt::from_unsigned_tx(tx).unwrap().serialize()
+    }
+
+    /// A store that returns attacker-controlled bytes for any key.
+    struct LyingStore(Vec<u8>);
+
+    impl BlobStore for LyingStore {
+        async fn put(&self, bytes: &[u8]) -> PsbtHash {
+            PsbtHash::digest_of(bytes)
+        }
+        async fn get(&self, _: &PsbtHash) -> Option<Vec<u8>> {
+            Some(self.0.clone())
+        }
+        async fn delete(&self, _: &PsbtHash) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_round_trips_honest_store() {
+        let store = InMemoryBlobStore::default();
+        let hash = store.put(&some_psbt_bytes()).await;
+        assert!(load_psbt(&store, hash).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_bytes_that_do_not_hash_to_the_key() {
+        let real = some_psbt_bytes();
+        let hash = PsbtHash::digest_of(&real);
+        let substituted = some_psbt_bytes()[..40].to_vec();
+        assert!(matches!(
+            load_psbt(&LyingStore(substituted), hash).await,
+            Err(JobsError::BlobIntegrity(h)) if h == hash
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_missing_blob() {
+        let store = InMemoryBlobStore::default();
+        let hash = PsbtHash::digest_of(b"never-stored");
+        assert!(matches!(
+            load_psbt(&store, hash).await,
+            Err(JobsError::BlobMissing(h)) if h == hash
+        ));
     }
 }

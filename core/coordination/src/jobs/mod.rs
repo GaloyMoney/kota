@@ -103,6 +103,11 @@ pub enum JobsError {
         "JobsError - BlobMissing: content {0} is referenced by the event log but absent from storage"
     )]
     BlobMissing(PsbtHash),
+    #[error(
+        "JobsError - BlobIntegrity: bytes fetched for {0} do not hash to their content \
+         address — the store returned corrupted or substituted content"
+    )]
+    BlobIntegrity(PsbtHash),
     #[error("JobsError - UnexpectedStatus: session {id} is {status}, expected {expected}")]
     UnexpectedStatus {
         id: PsbtSessionId,
