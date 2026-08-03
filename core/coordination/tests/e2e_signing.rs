@@ -142,6 +142,7 @@ impl Fixture {
                 keystores: vec![self.fingerprint],
             },
             expires_at(),
+            expires_at() - chrono::Duration::days(7),
         )
         .unwrap();
         PsbtSession::try_from_events(new_session.into_events()).unwrap()
@@ -668,5 +669,14 @@ async fn added_global_field_is_rejected() {
     assert!(matches!(
         validate_signed_submission(&unsigned, &signed, &fixture.fingerprint),
         Err(core_coordination::psbt::PsbtValidationError::GlobalFieldModified)
+    ));
+}
+
+#[tokio::test]
+async fn oversized_psbt_is_rejected_before_deserialization() {
+    let huge = vec![0u8; core_coordination::psbt::MAX_PSBT_BYTES + 1];
+    assert!(matches!(
+        parse_psbt(&huge),
+        Err(core_coordination::psbt::PsbtValidationError::TooLarge { .. })
     ));
 }

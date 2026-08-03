@@ -59,7 +59,7 @@ pub enum InvalidationReason {
 /// An outpoint consumed by the spend (txid:vout). Immutable once the
 /// session is proposed — it's part of the unsigned tx the PSBT-creation
 /// job builds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutPointRef {
     pub txid: Txid,
