@@ -18,8 +18,8 @@ use bitcoin::{
     Amount, Network, OutPoint, Psbt, Sequence, Transaction, TxIn, TxOut, absolute,
     transaction::Version,
 };
-use miniscript::ForEachKey;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
+use miniscript::{ForEachKey, Threshold};
 use miniscript::psbt::PsbtExt;
 
 use crate::primitives::DescriptorFingerprint;
@@ -29,8 +29,10 @@ use crate::psbt_session::{OutPointRef, SpendSpec};
 pub enum WalletError {
     #[error("WalletError - Miniscript: {0}")]
     Miniscript(#[from] miniscript::Error),
-    #[error("WalletError - DescriptorConversion: {0}")]
-    DescriptorConversion(#[from] miniscript::descriptor::ConversionError),
+    #[error("WalletError - Threshold: {0}")]
+    Threshold(#[from] miniscript::ThresholdError),
+    #[error("WalletError - NonDefiniteKey: {0}")]
+    NonDefiniteKey(#[from] miniscript::descriptor::NonDefiniteKeyError),
     #[error("WalletError - MissingFunding: no funding utxo for input {0}")]
     MissingFunding(OutPoint),
     #[error("WalletError - InvalidAddress: {0}")]
@@ -83,7 +85,8 @@ pub fn sortedmulti_wsh_descriptor(
     mut keystores: Vec<DescriptorPublicKey>,
 ) -> Result<Descriptor<DescriptorPublicKey>, WalletError> {
     keystores.sort_by_key(|k| k.to_string());
-    Ok(Descriptor::new_wsh_sortedmulti(threshold, keystores)?)
+    let threshold = Threshold::new(threshold, keystores)?;
+    Ok(Descriptor::new_wsh_sortedmulti(threshold)?)
 }
 
 /// Content address of a wallet: SHA-256 of the network and the
