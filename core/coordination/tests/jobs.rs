@@ -403,3 +403,105 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
     jobs.shutdown().await?;
     Ok(())
 }
+
+/// A session cancelled after a job was spawned must not poison the
+/// retry queue: both jobs complete as no-ops.
+#[tokio::test]
+async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set, skipping");
+        return Ok(());
+    };
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let (clock, _ctrl) = ClockHandle::manual();
+    let sessions = PsbtSessionRepo::new(&pool, clock.clone());
+    let wallets = WalletRepo::new(&pool, clock.clone());
+    let blobs = std::sync::Arc::new(InMemoryBlobStore::default());
+
+    let (_, _, descriptor, fingerprint) = setup_wallet(9);
+    let wallet = ensure_wallet(&wallets, &descriptor).await?;
+
+    let funding_txid = bitcoin::Txid::from_byte_array([44u8; 32]);
+    let destination = descriptor.at_derivation_index(5).unwrap().script_pubkey();
+    let session = sessions
+        .create(NewPsbtSession::try_new(
+            PsbtSessionId::new(),
+            wallet.id,
+            UserId::new(),
+            SpendSpec {
+                inputs: vec![OutPointRef {
+                    txid: funding_txid,
+                    vout: 0,
+                }],
+                outputs: vec![SpendOutput {
+                    address: bitcoin::Address::from_script(&destination, NETWORK)
+                        .unwrap()
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                    amount_sats: 50_000,
+                }],
+                fee_sats: 500,
+                change_output: None,
+            },
+            Policy {
+                threshold: 1,
+                keystores: vec![fingerprint],
+            },
+            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        )?)
+        .await?;
+    let session_id = session.id;
+
+    // the session is cancelled before any job runs
+    let mut session = sessions.find_by_id(session_id).await?;
+    let _ = session.cancel("no longer needed".to_string())?;
+    sessions.update(&mut session).await?;
+
+    let mut jobs = job::Jobs::init(
+        job::JobSvcConfig::builder()
+            .pool(pool.clone())
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    )
+    .await?;
+    let spawners = core_coordination::jobs::register(
+        &mut jobs,
+        &sessions,
+        &wallets,
+        blobs.clone(),
+        std::sync::Arc::new(StaticFunding { utxos: vec![] }),
+        NETWORK,
+    );
+    jobs.start_poll().await?;
+
+    let creation_id = job::JobId::new();
+    spawners
+        .psbt_creation
+        .spawn(
+            creation_id,
+            core_coordination::jobs::PsbtCreationJobConfig { session_id },
+        )
+        .await?;
+    jobs.await_completion(creation_id, Some(std::time::Duration::from_secs(30)))
+        .await?;
+
+    let finalization_id = job::JobId::new();
+    spawners
+        .finalization
+        .spawn(
+            finalization_id,
+            core_coordination::jobs::FinalizationJobConfig { session_id },
+        )
+        .await?;
+    jobs.await_completion(finalization_id, Some(std::time::Duration::from_secs(30)))
+        .await?;
+
+    let session = sessions.find_by_id(session_id).await?;
+    assert_eq!(session.status(), PsbtSessionStatus::Cancelled);
+
+    jobs.shutdown().await?;
+    Ok(())
+}

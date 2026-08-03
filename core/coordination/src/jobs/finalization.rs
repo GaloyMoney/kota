@@ -89,6 +89,14 @@ where
                 tracing::info!("threshold not met, nothing to finalize");
                 Ok(JobCompletion::Complete)
             }
+            // The session moved on between spawn and execution (cancelled,
+            // expired, broadcast by a previous run, ...). It will never
+            // become finalizable again, so retrying is pointless — complete
+            // as a no-op instead of poisoning the retry queue.
+            Err(JobsError::UnexpectedStatus { status, .. }) => {
+                tracing::info!(%status, "session no longer finalizable, nothing to do");
+                Ok(JobCompletion::Complete)
+            }
             Err(e) => Err(Box::new(e)),
         }
     }

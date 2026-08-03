@@ -16,7 +16,7 @@ use crate::psbt_session::PsbtSessionRepo;
 use crate::storage::BlobStore;
 use crate::wallet::WalletRepo;
 
-use super::{FundingUtxoProvider, run_psbt_creation};
+use super::{FundingUtxoProvider, JobsError, run_psbt_creation};
 
 pub const PSBT_CREATION_JOB: JobType = JobType::new("coordination.psbt-creation");
 
@@ -103,7 +103,7 @@ where
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        run_psbt_creation(
+        match run_psbt_creation(
             &self.sessions,
             &self.wallets,
             self.blobs.as_ref(),
@@ -111,7 +111,21 @@ where
             self.network,
             self.config.session_id,
         )
-        .await?;
-        Ok(JobCompletion::Complete)
+        .await
+        {
+            Ok(hash) => {
+                tracing::info!(%hash, "unsigned psbt recorded");
+                Ok(JobCompletion::Complete)
+            }
+            // The session moved on between spawn and execution (cancelled
+            // or expired while pending). It will never need a PSBT, so
+            // retrying is pointless — complete as a no-op instead of
+            // poisoning the retry queue.
+            Err(JobsError::UnexpectedStatus { status, .. }) => {
+                tracing::info!(%status, "session no longer pending, nothing to do");
+                Ok(JobCompletion::Complete)
+            }
+            Err(e) => Err(Box::new(e)),
+        }
     }
 }
