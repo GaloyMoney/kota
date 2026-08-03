@@ -460,7 +460,7 @@ async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
 
     // the session is cancelled before any job runs
     let mut session = sessions.find_by_id(session_id).await?;
-    let _ = session.cancel("no longer needed".to_string())?;
+    let _ = session.cancel(UserId::new(), "no longer needed".to_string())?;
     sessions.update(&mut session).await?;
 
     let mut jobs = job::Jobs::init(
