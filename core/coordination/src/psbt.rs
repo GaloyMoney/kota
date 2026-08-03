@@ -96,6 +96,34 @@ pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
     Psbt::deserialize(bytes).map_err(|e| PsbtValidationError::Deserialize(e.to_string()))
 }
 
+/// Cryptographically verify one partial signature: it must use
+/// `SIGHASH_ALL` and must verify against the sighash computed from the
+/// *original* (platform-built, trusted) PSBT — never from a submitted
+/// or stored document, whose `witness_utxo`/`witness_script` fields
+/// are not asserted immutable.
+fn verify_partial_sig(
+    original: &Psbt,
+    cache: &mut SighashCache<&bitcoin::Transaction>,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    index: usize,
+    pubkey: &PublicKey,
+    sig: &EcdsaSignature,
+) -> Result<(), PsbtValidationError> {
+    if sig.sighash_type != EcdsaSighashType::All {
+        return Err(PsbtValidationError::NonSigHashAllSighash(index));
+    }
+    let msg = original
+        .sighash_msg(index, cache, None)
+        .map_err(|e| PsbtValidationError::SighashComputation {
+            index,
+            reason: e.to_string(),
+        })?
+        .to_secp_msg();
+    secp.verify_ecdsa(&msg, &sig.signature, &pubkey.inner)
+        .map_err(|_| PsbtValidationError::InvalidPartialSignature(index))?;
+    Ok(())
+}
+
 /// A partial signature extracted from a validated submission, ready to be
 /// merged into the platform's copy of the original PSBT.
 #[derive(Debug, Clone)]
@@ -220,22 +248,9 @@ pub fn validate_signed_submission(
                     });
                 }
             }
-            if sig.sighash_type != EcdsaSighashType::All {
-                return Err(PsbtValidationError::NonSigHashAllSighash(idx));
-            }
-            // Verify against the sighash of the *original* PSBT: the
-            // submitted document's utxo/script fields are attacker-
-            // controlled at this point, so a sighash derived from it
-            // would prove nothing about validity at finalization time.
-            let msg = original
-                .sighash_msg(idx, &mut cache, None)
-                .map_err(|e| PsbtValidationError::SighashComputation {
-                    index: idx,
-                    reason: e.to_string(),
-                })?
-                .to_secp_msg();
-            secp.verify_ecdsa(&msg, &sig.signature, &pk.inner)
-                .map_err(|_| PsbtValidationError::InvalidPartialSignature(idx))?;
+            // SIGHASH_ALL + cryptographic validity against the
+            // original's sighash (helper docs).
+            verify_partial_sig(original, &mut cache, &secp, idx, pk, sig)?;
             added_here += 1;
             extracted.push(ExtractedSignature {
                 input_index: idx,
@@ -269,4 +284,42 @@ pub fn merge_partial_sigs(original: &Psbt, new_sigs: &[ExtractedSignature]) -> P
             .insert(sig.pubkey, sig.signature);
     }
     merged
+}
+
+/// Re-verify a platform-built merged blob (`original` plus one signer's
+/// extracted signatures, as persisted at upload time) before it is used
+/// at finalization.
+///
+/// Upload-time validation should make this redundant — but finalization
+/// turns these bytes into a transaction that moves real money, and
+/// `miniscript`'s `finalize` only checks that the script is *satisfied*,
+/// not that the signatures *verify*: a corrupt or substituted blob would
+/// otherwise be recorded as `Finalized` with the txid of a transaction
+/// the network will reject, bricking the session. Re-verifying here
+/// surfaces storage corruption as an error *before* any event is
+/// recorded. Content-address verification ([`PsbtHash`]) detects swapped
+/// bytes; this catches the subtler case of a blob that is structurally
+/// intact but cryptographically wrong.
+pub fn verify_merged_blob(original: &Psbt, merged: &Psbt) -> Result<(), PsbtValidationError> {
+    if merged.unsigned_tx != original.unsigned_tx {
+        return Err(PsbtValidationError::UnsignedTxModified);
+    }
+    if merged.inputs.len() != original.inputs.len() {
+        return Err(PsbtValidationError::InputOutputCountMismatch);
+    }
+
+    let secp = secp256k1::Secp256k1::verification_only();
+    let mut cache = SighashCache::new(&original.unsigned_tx);
+    for (idx, (orig_in, merged_in)) in original.inputs.iter().zip(merged.inputs.iter()).enumerate()
+    {
+        for (pk, sig) in &merged_in.partial_sigs {
+            // signatures already present in the original are trusted
+            // (the platform built it); verify only what the blob added
+            if orig_in.partial_sigs.contains_key(pk) {
+                continue;
+            }
+            verify_partial_sig(original, &mut cache, &secp, idx, pk, sig)?;
+        }
+    }
+    Ok(())
 }

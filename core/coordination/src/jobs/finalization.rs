@@ -28,6 +28,10 @@ use super::JobsError;
 /// signers in recording order until the transaction finalizes — so
 /// `sigs_used` is the minimal recorded prefix that authorized the
 /// spend, a deterministic answer to "whose signature authorized this?".
+/// Every recorded blob is re-verified against the original's sighash
+/// before merging (`crate::psbt::verify_merged_blob`): `finalize` only
+/// checks the script is satisfied, so a corrupt blob would otherwise
+/// produce an invalid tx and record it as `Finalized`.
 ///
 /// The recorded txid is computed from the exact bytes uploaded as
 /// `final_tx_hash`, so the chain-sync stream (which matches on txid)
@@ -60,11 +64,17 @@ pub async fn run_finalization(
     let unsigned = load_psbt(blobs, unsigned_hash).await?;
 
     let secp = secp256k1::Secp256k1::new();
-    let mut combined = unsigned;
+    let mut combined = unsigned.clone();
     let mut sigs_used = Vec::new();
 
     for record in session.signatures() {
         let signed = load_psbt(blobs, record.signed_psbt_hash).await?;
+        // Defense-in-depth: upload-time validation should make this
+        // redundant, but `finalize` below only checks the script is
+        // satisfied, not that signatures verify — a corrupt recorded
+        // blob would otherwise produce an invalid tx recorded as
+        // `Finalized`, bricking the session (see `verify_merged_blob`).
+        psbt::verify_merged_blob(&unsigned, &signed)?;
         for (idx, input) in signed.inputs.iter().enumerate() {
             for (pk, sig) in &input.partial_sigs {
                 combined.inputs[idx].partial_sigs.entry(*pk).or_insert(*sig);
