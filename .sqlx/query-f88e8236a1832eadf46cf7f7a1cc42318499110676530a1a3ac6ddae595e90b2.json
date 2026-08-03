@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM core_psbt_sessions WHERE COALESCE(status = $1, $1 IS NULL) AND (COALESCE(id > $3, true)) ORDER BY id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN core_psbt_session_events e ON i.id = e.id ORDER BY i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM core_psbt_sessions WHERE COALESCE(wallet_id = $1, $1 IS NULL) AND COALESCE(status = $2, $2 IS NULL) AND (COALESCE(id < $4, true)) ORDER BY id DESC LIMIT $3) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN core_psbt_session_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -36,6 +36,7 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Text",
         "Int8",
         "Uuid",
@@ -51,5 +52,5 @@
       null
     ]
   },
-  "hash": "e92dec20d1e0c93db8e12d48a377a5ced06f9c88e3f708a92b21ea5b64379bb2"
+  "hash": "f88e8236a1832eadf46cf7f7a1cc42318499110676530a1a3ac6ddae595e90b2"
 }
