@@ -29,7 +29,6 @@ use bitcoin::bip32::{DerivationPath, Fingerprint as KeyFingerprint, Xpriv, Xpub}
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{self, Secp256k1};
 use bitcoin::{Amount, Network, TxOut};
-use chrono::{DateTime, Utc};
 use es_entity::clock::ClockHandle;
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey, DescriptorXKey, Wildcard};
 use std::str::FromStr;
@@ -175,8 +174,6 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
             &wallet,
             UserId::new(),
             spec,
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
-            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;
     let session_id = session.id;
@@ -342,8 +339,6 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
                     derivation_index: 1,
                 }),
             },
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
-            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;
     let session_id = session.id;
@@ -452,8 +447,6 @@ async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
                 fee_sats: 500,
                 change_output: None,
             },
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
-            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;
     let session_id = session.id;

@@ -30,7 +30,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{self, Message, Secp256k1};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{Amount, Network, TxOut};
-use chrono::{DateTime, Utc};
 use es_entity::{IntoEvents, TryFromEvents};
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey, DescriptorXKey, Wildcard};
 use std::str::FromStr;
@@ -77,10 +76,6 @@ fn active_wallet(keystore: DescriptorPublicKey) -> Wallet {
     .unwrap();
     let _ = wallet.add_keystore(keystore, participant).unwrap();
     wallet
-}
-
-fn expires_at() -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap()
 }
 
 struct Fixture {
@@ -160,8 +155,6 @@ impl Fixture {
             &self.wallet,
             UserId::new(),
             self.spec.clone(),
-            expires_at(),
-            expires_at() - chrono::Duration::days(7),
         )
         .unwrap();
         PsbtSession::try_from_events(new_session.into_events()).unwrap()

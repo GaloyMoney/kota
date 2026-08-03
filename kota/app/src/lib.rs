@@ -206,15 +206,8 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         spend: SpendSpec,
     ) -> Result<PsbtSession, CoordinationError> {
         let wallet = self.wallets.find_by_id(wallet_id).await?;
-        let now = self.clock.now();
-        let new_session = NewPsbtSession::try_new(
-            PsbtSessionId::new(),
-            &wallet,
-            proposed_by,
-            spend,
-            now + self.config.proposal_ttl,
-            now,
-        )?;
+        let new_session =
+            NewPsbtSession::try_new(PsbtSessionId::new(), &wallet, proposed_by, spend)?;
         // Session events and the PSBT-creation job row commit
         // atomically: a crash between them would leave the session
         // Pending forever with no job enqueued to build its PSBT.
