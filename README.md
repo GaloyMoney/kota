@@ -1,4 +1,4 @@
-# multisig-sig
+# kota
 
 Coordination backend for multi-user bitcoin multisig custody. The platform
 never holds key material and never signs — signing happens on each quorum
