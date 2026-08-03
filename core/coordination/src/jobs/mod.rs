@@ -1,10 +1,11 @@
-//! The async job units that drive the `PsbtSession` lifecycle.
+//! The async job units that drive the `PsbtSession` lifecycle, plus
+//! their `job`-crate scheduling adapters (one file per job type).
 //!
-//! Each function is one idempotent unit of work: load the aggregate, do
-//! the thing, persist. They contain no scheduling logic — an executor
-//! (sqlxmq/apalis/...; decision deferred) is expected to call them with
-//! retries, relying on entity-level idempotency ([`es_entity::Idempotent`])
-//! to make re-runs safe no-ops.
+//! Each unit of work is one idempotent function: load the aggregate, do
+//! the thing, persist. The runner in the same file is a thin scheduling
+//! adapter over it, registered with the `job` executor via [`register`].
+//! Entity-level idempotency ([`es_entity::Idempotent`]) makes executor
+//! retries safe no-ops.
 //!
 //! Trust boundaries enforced here:
 //!
@@ -21,25 +22,26 @@
 
 use std::sync::Arc;
 
-use bitcoin::secp256k1;
-use bitcoin::{BlockHash, Network, Psbt, Txid};
-use miniscript::psbt::PsbtExt;
+use bitcoin::{BlockHash, Network, Txid};
 
 use crate::primitives::{PsbtHash, PsbtSessionId};
-use crate::psbt::{self, PsbtValidationError};
+use crate::psbt::PsbtValidationError;
 use crate::psbt_session::{
     InvalidationReason, OutPointRef, PsbtSessionError, PsbtSessionRepo, PsbtSessionStatus,
-    SpendSpec,
 };
 use crate::storage::BlobStore;
 use crate::wallet::repo::WalletFindError;
-use crate::wallet::{FundingUtxo, Wallet, WalletError, WalletRepo, build_unsigned_psbt};
+use crate::wallet::{FundingUtxo, Wallet, WalletError, WalletRepo};
 
 mod finalization;
 mod psbt_creation;
 
-pub use finalization::{FINALIZATION_JOB, FinalizationJobConfig, FinalizationJobInit};
-pub use psbt_creation::{PSBT_CREATION_JOB, PsbtCreationJobConfig, PsbtCreationJobInit};
+pub use finalization::{
+    FINALIZATION_JOB, FinalizationJobConfig, FinalizationJobInit, run_finalization,
+};
+pub use psbt_creation::{
+    PSBT_CREATION_JOB, PsbtCreationJobConfig, PsbtCreationJobInit, run_psbt_creation,
+};
 
 /// Spawners for the coordination job types, returned by [`register`].
 /// The use-case layer spawns `psbt_creation` when a session is proposed
@@ -126,119 +128,6 @@ pub trait FundingUtxoProvider {
     ) -> impl Future<Output = Result<Vec<FundingUtxo>, JobsError>> + Send + 'a;
 }
 
-/// PSBT-creation job: build the unsigned PSBT for a `Pending` session,
-/// upload it to content-addressed storage, and record the hash —
-/// transitioning the session to `Collecting`.
-///
-/// Idempotent: if the session already carries an unsigned PSBT hash, it
-/// is returned without redoing any work (a retried job after a crash
-/// between upload and persist just rebuilds and re-records the same
-/// content address — `put` is content-addressed, so even that is a
-/// no-op at the storage layer).
-pub async fn run_psbt_creation(
-    sessions: &PsbtSessionRepo,
-    wallets: &WalletRepo,
-    blobs: &impl BlobStore,
-    funding: &impl FundingUtxoProvider,
-    network: Network,
-    session_id: PsbtSessionId,
-) -> Result<PsbtHash, JobsError> {
-    let mut session = sessions.find_by_id(session_id).await?;
-
-    if let Some(hash) = session.unsigned_psbt_hash() {
-        return Ok(hash);
-    }
-    if session.status() != PsbtSessionStatus::Pending {
-        return Err(JobsError::UnexpectedStatus {
-            id: session_id,
-            status: session.status(),
-            expected: "pending",
-        });
-    }
-
-    let wallet = wallets.find_by_id(session.wallet_id).await?;
-    let utxos = funding.funding_utxos(&wallet, &session.inputs).await?;
-    let spend = SpendSpec {
-        inputs: session.inputs.clone(),
-        outputs: session.outputs.clone(),
-        fee_sats: session.fee_sats,
-        change_output: session.change_output.clone(),
-    };
-    let psbt = build_unsigned_psbt(&spend, wallet.descriptor(), &utxos, network)?;
-
-    let hash = blobs.put(&psbt.serialize()).await;
-    let _ = session.record_psbt_created(hash)?;
-    sessions.update(&mut session).await?;
-    Ok(hash)
-}
-
-/// Finalization job: once the threshold is met, recompute the final
-/// transaction platform-side and record it (`Finalized`).
-///
-/// The final PSBT is assembled from the *original* unsigned PSBT plus
-/// the partial signatures in the platform-built merged blobs, adding
-/// signers in recording order until the transaction finalizes — so
-/// `sigs_used` is the minimal recorded prefix that authorized the
-/// spend, a deterministic answer to "whose signature authorized this?".
-///
-/// The recorded txid is computed from the exact bytes uploaded as
-/// `final_tx_hash`, so the chain-sync stream (which matches on txid)
-/// and the audit blob can never disagree.
-///
-/// Idempotent: an already-finalized session returns its recorded txid.
-pub async fn run_finalization(
-    sessions: &PsbtSessionRepo,
-    blobs: &impl BlobStore,
-    session_id: PsbtSessionId,
-) -> Result<Txid, JobsError> {
-    let mut session = sessions.find_by_id(session_id).await?;
-
-    if let Some(finalization) = session.finalization() {
-        return Ok(finalization.txid);
-    }
-    if session.status() != PsbtSessionStatus::Collecting {
-        return Err(JobsError::UnexpectedStatus {
-            id: session_id,
-            status: session.status(),
-            expected: "collecting",
-        });
-    }
-    if !session.threshold_met() {
-        return Err(JobsError::ThresholdNotMet(session_id));
-    }
-    let unsigned_hash = session
-        .unsigned_psbt_hash()
-        .expect("status Collecting implies PsbtCreated was recorded");
-    let unsigned = load_psbt(blobs, unsigned_hash).await?;
-
-    let secp = secp256k1::Secp256k1::new();
-    let mut combined = unsigned;
-    let mut sigs_used = Vec::new();
-
-    for record in session.signatures() {
-        let signed = load_psbt(blobs, record.signed_psbt_hash).await?;
-        for (idx, input) in signed.inputs.iter().enumerate() {
-            for (pk, sig) in &input.partial_sigs {
-                combined.inputs[idx].partial_sigs.entry(*pk).or_insert(*sig);
-            }
-        }
-        sigs_used.push(record.fingerprint);
-
-        if let Ok(final_psbt) = combined.clone().finalize(&secp) {
-            let tx = final_psbt
-                .extract_tx()
-                .map_err(|_| JobsError::CannotFinalize)?;
-            let txid = tx.compute_txid();
-            let final_tx_hash = blobs.put(&bitcoin::consensus::serialize(&tx)).await;
-            let _ = session.finalize(txid, final_tx_hash, sigs_used)?;
-            sessions.update(&mut session).await?;
-            return Ok(txid);
-        }
-    }
-
-    Err(JobsError::CannotFinalize)
-}
-
 /// A chain-sync observation about a session's finalized transaction.
 /// Delivered by the (future) outbox consumer — never by user commands.
 pub enum ChainObservation {
@@ -278,13 +167,4 @@ pub async fn apply_chain_observation(
         sessions.update(&mut session).await?;
     }
     Ok(())
-}
-
-/// Fetch and parse a PSBT blob. Content-addressed fetch is
-/// self-verifying (the key is the content digest); a missing blob for
-/// an event-log-referenced hash is a storage-integrity error, not a
-/// routine miss.
-async fn load_psbt(blobs: &impl BlobStore, hash: PsbtHash) -> Result<Psbt, JobsError> {
-    let bytes = blobs.get(&hash).await.ok_or(JobsError::BlobMissing(hash))?;
-    Ok(psbt::parse_psbt(&bytes)?)
 }

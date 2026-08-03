@@ -1,7 +1,7 @@
 //! `job`-crate wiring for the PSBT-creation job unit.
 //!
-//! The unit of work lives in [`super::run_psbt_creation`]; this file is
-//! only the scheduling adapter: config payload, initializer, and runner.
+//! The unit of work is [`run_psbt_creation`]; below it is only the
+//! scheduling adapter: config payload, initializer, and runner.
 
 use std::sync::Arc;
 
@@ -11,12 +11,58 @@ use serde::{Deserialize, Serialize};
 
 use bitcoin::Network;
 
-use crate::primitives::PsbtSessionId;
-use crate::psbt_session::PsbtSessionRepo;
+use crate::primitives::{PsbtHash, PsbtSessionId};
+use crate::psbt_session::{PsbtSessionRepo, PsbtSessionStatus, SpendSpec};
 use crate::storage::BlobStore;
-use crate::wallet::WalletRepo;
+use crate::wallet::{WalletRepo, build_unsigned_psbt};
 
-use super::{FundingUtxoProvider, JobsError, run_psbt_creation};
+use super::{FundingUtxoProvider, JobsError};
+
+/// PSBT-creation job: build the unsigned PSBT for a `Pending` session,
+/// upload it to content-addressed storage, and record the hash —
+/// transitioning the session to `Collecting`.
+///
+/// Idempotent: if the session already carries an unsigned PSBT hash, it
+/// is returned without redoing any work (a retried job after a crash
+/// between upload and persist just rebuilds and re-records the same
+/// content address — `put` is content-addressed, so even that is a
+/// no-op at the storage layer).
+pub async fn run_psbt_creation(
+    sessions: &PsbtSessionRepo,
+    wallets: &WalletRepo,
+    blobs: &impl BlobStore,
+    funding: &impl FundingUtxoProvider,
+    network: Network,
+    session_id: PsbtSessionId,
+) -> Result<PsbtHash, JobsError> {
+    let mut session = sessions.find_by_id(session_id).await?;
+
+    if let Some(hash) = session.unsigned_psbt_hash() {
+        return Ok(hash);
+    }
+    if session.status() != PsbtSessionStatus::Pending {
+        return Err(JobsError::UnexpectedStatus {
+            id: session_id,
+            status: session.status(),
+            expected: "pending",
+        });
+    }
+
+    let wallet = wallets.find_by_id(session.wallet_id).await?;
+    let utxos = funding.funding_utxos(&wallet, &session.inputs).await?;
+    let spend = SpendSpec {
+        inputs: session.inputs.clone(),
+        outputs: session.outputs.clone(),
+        fee_sats: session.fee_sats,
+        change_output: session.change_output.clone(),
+    };
+    let psbt = build_unsigned_psbt(&spend, wallet.descriptor(), &utxos, network)?;
+
+    let hash = blobs.put(&psbt.serialize()).await;
+    let _ = session.record_psbt_created(hash)?;
+    sessions.update(&mut session).await?;
+    Ok(hash)
+}
 
 pub const PSBT_CREATION_JOB: JobType = JobType::new("coordination.psbt-creation");
 
