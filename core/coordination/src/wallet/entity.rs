@@ -207,11 +207,16 @@ impl Wallet {
     /// Record a participant-submitted keystore.
     ///
     /// One keystore per participant: resubmitting the identical key is
-    /// an idempotent no-op (crash/retry); submitting a *different* key
-    /// requires an explicit `remove_keystore` first. Across
-    /// participants, master fingerprints (origin fingerprint, falling
-    /// back to the key's own) must be distinct — two participants
-    /// presenting keys from the same device is a policy error.
+    /// an idempotent no-op (crash/retry) *in any lifecycle state* —
+    /// critically including after activation, since the submission that
+    /// completes the policy records `Activated` in the same command,
+    /// so a retried final submission observes an `Active` wallet and
+    /// must still be recognized as already applied. Submitting a
+    /// *different* key requires an explicit `remove_keystore` first.
+    /// Across participants, master fingerprints (origin fingerprint,
+    /// falling back to the key's own) must be distinct — two
+    /// participants presenting keys from the same device is a policy
+    /// error.
     ///
     /// When this submission completes the policy, the canonical
     /// descriptor is derived (keystores sorted — submission order does
@@ -222,6 +227,18 @@ impl Wallet {
         keystore: DescriptorPublicKey,
         submitted_by: UserId,
     ) -> Result<Idempotent<()>, WalletError> {
+        // Idempotency first, before any lifecycle gate: the retry of an
+        // already-recorded submission is a no-op even though the wallet
+        // may since have activated or been cancelled.
+        if let Some((_, existing)) = self
+            .submissions()
+            .into_iter()
+            .find(|(participant, _)| *participant == submitted_by)
+        {
+            if existing == keystore {
+                return Ok(Idempotent::AlreadyApplied);
+            }
+        }
         match self.status() {
             WalletStatus::CollectingKeystores => {}
             WalletStatus::Active => return Err(WalletError::AlreadyActive),
@@ -230,16 +247,14 @@ impl Wallet {
         if !self.participants.contains(&submitted_by) {
             return Err(WalletError::NotAParticipant(submitted_by));
         }
-        if let Some((_, existing)) = self
+        if self
             .submissions()
-            .into_iter()
-            .find(|(participant, _)| *participant == submitted_by)
+            .iter()
+            .any(|(participant, _)| *participant == submitted_by)
         {
-            return if existing == keystore {
-                Ok(Idempotent::AlreadyApplied)
-            } else {
-                Err(WalletError::ParticipantAlreadySubmitted(submitted_by))
-            };
+            // a submission exists and differs from `keystore` (the
+            // identical case returned above)
+            return Err(WalletError::ParticipantAlreadySubmitted(submitted_by));
         }
         let fingerprint = keystore_fingerprint(&keystore);
         if self
@@ -540,6 +555,49 @@ mod tests {
                 .was_already_applied()
         );
         assert_eq!(wallet.keystores().len(), 1);
+    }
+
+    #[test]
+    fn activating_submission_is_retryable() {
+        let (mut wallet, participants) = new_wallet();
+        let _ = wallet.add_keystore(keystore(1), participants[0]).unwrap();
+        let _ = wallet.add_keystore(keystore(2), participants[1]).unwrap();
+        assert!(
+            wallet
+                .add_keystore(keystore(3), participants[2])
+                .unwrap()
+                .did_execute()
+        );
+        assert_eq!(wallet.status(), WalletStatus::Active);
+
+        // crash/retry of the submission that activated the wallet: the
+        // wallet is now Active, but the retry must still be recognized
+        // as already applied, not rejected as AlreadyActive
+        assert!(
+            wallet
+                .add_keystore(keystore(3), participants[2])
+                .unwrap()
+                .was_already_applied()
+        );
+        assert_eq!(wallet.keystores().len(), 3);
+    }
+
+    #[test]
+    fn submission_retry_after_cancel_is_still_idempotent() {
+        let (mut wallet, participants) = new_wallet();
+        let _ = wallet.add_keystore(keystore(1), participants[0]).unwrap();
+        let _ = wallet
+            .cancel(participants[0], "abandoned".to_string())
+            .unwrap();
+
+        // a retry in flight from before the cancellation lands as a
+        // no-op, not an error
+        assert!(
+            wallet
+                .add_keystore(keystore(1), participants[0])
+                .unwrap()
+                .was_already_applied()
+        );
     }
 
     #[test]
