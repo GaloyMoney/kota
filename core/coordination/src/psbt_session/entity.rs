@@ -332,6 +332,14 @@ impl PsbtSession {
     }
 
     /// Chain sync observed a reversal (reorg / external spend / RBF).
+    ///
+    /// `InputsSpentExternally` is additionally accepted from any
+    /// pre-broadcast status: a competing spend of the inputs dooms the
+    /// session wherever it is in its lifecycle — the PSBT can never be
+    /// built (funding gone), finalized into a valid transaction, or
+    /// confirmed. Rejecting the observation there would leave a zombie
+    /// session collecting signatures for a spend that can never happen,
+    /// until the expiry sweep eventually closes it.
     pub fn invalidate(
         &mut self,
         reason: InvalidationReason,
@@ -341,14 +349,18 @@ impl PsbtSession {
             already_applied: PsbtSessionEvent::Invalidated { .. },
             resets_on: PsbtSessionEvent::Confirmed { .. },
         );
-        match self.status() {
-            PsbtSessionStatus::Broadcast | PsbtSessionStatus::Confirmed => {}
-            status => {
-                return Err(PsbtSessionError::CannotInvalidate {
-                    id: self.id,
-                    status,
-                });
-            }
+        let allowed = match self.status() {
+            PsbtSessionStatus::Broadcast | PsbtSessionStatus::Confirmed => true,
+            PsbtSessionStatus::Pending
+            | PsbtSessionStatus::Collecting
+            | PsbtSessionStatus::Finalized => reason == InvalidationReason::InputsSpentExternally,
+            _ => false,
+        };
+        if !allowed {
+            return Err(PsbtSessionError::CannotInvalidate {
+                id: self.id,
+                status: self.status(),
+            });
         }
 
         self.events.push(PsbtSessionEvent::Invalidated { reason });
@@ -601,6 +613,13 @@ impl NewPsbtSession {
     /// fingerprint) is *snapshotted* into the session at creation, so
     /// the session pins the exact key set its signatures are validated
     /// against even if wallet membership were to change later.
+    ///
+    /// The use-case layer MUST first call
+    /// `PsbtSessionRepo::conflicting_inputs` and reject the proposal if
+    /// another live session of this wallet already consumes any of
+    /// `spend.inputs` — two live proposals racing the same outpoints
+    /// means one of them can never confirm. (That check cannot live
+    /// here: it needs the database.)
     pub fn try_new(
         id: PsbtSessionId,
         wallet: &Wallet,
@@ -1110,10 +1129,69 @@ mod tests {
     }
 
     #[test]
-    fn cannot_invalidate_before_broadcast() {
+    fn external_spend_invalidates_at_any_pre_broadcast_status() {
+        // a competing spend of the inputs dooms the session wherever it
+        // is in its lifecycle — Pending, Collecting, or Finalized
+        let mut session = create_session();
+        assert!(
+            session
+                .invalidate(InvalidationReason::InputsSpentExternally)
+                .unwrap()
+                .did_execute()
+        );
+        assert_eq!(session.status(), PsbtSessionStatus::Invalidated);
+
+        let mut session = create_collecting_session();
+        assert!(
+            session
+                .invalidate(InvalidationReason::InputsSpentExternally)
+                .unwrap()
+                .did_execute()
+        );
+        assert_eq!(session.status(), PsbtSessionStatus::Invalidated);
+
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        let _ = add_sig(&mut session, 2).unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
+        assert!(
+            session
+                .invalidate(InvalidationReason::InputsSpentExternally)
+                .unwrap()
+                .did_execute()
+        );
+        assert_eq!(session.status(), PsbtSessionStatus::Invalidated);
+    }
+
+    #[test]
+    fn reorg_does_not_invalidate_before_broadcast() {
+        // only an external input spend dooms a pre-broadcast session;
+        // a reorg of a tx that was never seen on-chain is meaningless
         let mut session = create_collecting_session();
         assert!(matches!(
+            session.invalidate(InvalidationReason::Reorged),
+            Err(PsbtSessionError::CannotInvalidate { .. })
+        ));
+
+        // terminal states stay terminal
+        let _ = session.cancel(UserId::new(), "done".to_string()).unwrap();
+        assert!(matches!(
             session.invalidate(InvalidationReason::InputsSpentExternally),
+            Err(PsbtSessionError::CannotInvalidate { .. })
+        ));
+    }
+
+    #[test]
+    fn cannot_invalidate_before_broadcast() {
+        // only an external input spend dooms a pre-broadcast session —
+        // mempool/RBF observations require the tx to actually be out
+        let mut session = create_collecting_session();
+        assert!(matches!(
+            session.invalidate(InvalidationReason::MempoolEvicted),
+            Err(PsbtSessionError::CannotInvalidate { .. })
+        ));
+        assert!(matches!(
+            session.invalidate(InvalidationReason::ReplacedByFeeBump),
             Err(PsbtSessionError::CannotInvalidate { .. })
         ));
     }

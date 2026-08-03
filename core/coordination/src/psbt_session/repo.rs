@@ -6,13 +6,13 @@ use es_entity::*;
 use crate::primitives::{PsbtSessionId, WalletId};
 
 use super::entity::*;
-use super::primitives::PsbtSessionStatus;
+use super::primitives::{OutPointRef, PsbtSessionStatus};
 
 #[derive(EsRepo)]
 #[es_repo(
     entity = "PsbtSession",
     columns(
-        wallet_id(ty = "WalletId", create(accessor = "wallet_id()")),
+        wallet_id(ty = "WalletId", list_for, create(accessor = "wallet_id()")),
         status(
             ty = "PsbtSessionStatus",
             list_for,
@@ -41,6 +41,54 @@ impl PsbtSessionRepo {
         Self {
             pool: pool.clone(),
             clock,
+        }
+    }
+
+    /// Outpoints from `inputs` that another *live* session of the same
+    /// wallet already consumes — i.e. proposing `inputs` would race an
+    /// existing session to broadcast. The use-case layer must call this
+    /// before `NewPsbtSession::try_new` and reject on a non-empty
+    /// result: two live proposals spending the same outpoint means one
+    /// of them can never confirm.
+    ///
+    /// This is an advisory guard at proposal time, not a lock: two
+    /// concurrent proposals can both pass it. The race remainder is
+    /// resolved by chain sync — the loser's inputs are observed spent
+    /// and the session is `Invalidated` with
+    /// `InvalidationReason::InputsSpentExternally` (accepted from any
+    /// pre-broadcast status for exactly this reason).
+    pub async fn conflicting_inputs(
+        &self,
+        wallet_id: WalletId,
+        inputs: &[OutPointRef],
+    ) -> Result<Vec<OutPointRef>, PsbtSessionQueryError> {
+        let mut conflicting: Vec<OutPointRef> = Vec::new();
+        let mut args = es_entity::PaginatedQueryArgs::default();
+        loop {
+            let es_entity::PaginatedQueryRet {
+                entities,
+                has_next_page,
+                end_cursor,
+            } = self
+                .list_for_wallet_id_by_id(wallet_id, args, es_entity::ListDirection::Descending)
+                .await?;
+            for session in entities {
+                if !session.status().claims_inputs() {
+                    continue;
+                }
+                for input in &session.inputs {
+                    if inputs.contains(input) && !conflicting.contains(input) {
+                        conflicting.push(input.clone());
+                    }
+                }
+            }
+            if !has_next_page {
+                return Ok(conflicting);
+            }
+            args = es_entity::PaginatedQueryArgs {
+                after: end_cursor,
+                ..Default::default()
+            };
         }
     }
 }

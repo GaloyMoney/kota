@@ -41,6 +41,19 @@ pub enum PsbtSessionStatus {
     Cancelled,
 }
 
+impl PsbtSessionStatus {
+    /// Whether a session in this status still holds a claim on its
+    /// inputs: a competing proposal spending the same outpoints would
+    /// race it to broadcast. Chain-settled (`Confirmed`) and terminal
+    /// states release the claim.
+    pub fn claims_inputs(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Collecting | Self::Finalized | Self::Broadcast
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvalidationReason {

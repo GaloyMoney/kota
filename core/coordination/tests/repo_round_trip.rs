@@ -107,3 +107,89 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn conflicting_inputs_finds_overlap_with_live_sessions() -> anyhow::Result<()> {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set, skipping");
+        return Ok(());
+    };
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let (clock, _ctrl) = ClockHandle::manual();
+    let repo = PsbtSessionRepo::new(&pool, clock);
+
+    let wallet = active_wallet();
+    let contested = OutPointRef {
+        txid: bitcoin::Txid::from_byte_array([100; 32]),
+        vout: 0,
+    };
+    let uncontested = OutPointRef {
+        txid: bitcoin::Txid::from_byte_array([200; 32]),
+        vout: 1,
+    };
+
+    let propose_with = |wallet: &Wallet, inputs: Vec<OutPointRef>| {
+        NewPsbtSession::try_new(
+            PsbtSessionId::new(),
+            wallet,
+            UserId::new(),
+            SpendSpec {
+                inputs,
+                outputs: vec![SpendOutput {
+                    address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
+                        .parse()
+                        .unwrap(),
+                    amount_sats: 50_000,
+                }],
+                fee_sats: 500,
+                change_output: None,
+            },
+        )
+        .unwrap()
+    };
+
+    // a live session holding the contested outpoint
+    repo.create(propose_with(&wallet, vec![contested.clone()]))
+        .await?;
+
+    let conflicting = repo
+        .conflicting_inputs(wallet.id, std::slice::from_ref(&uncontested))
+        .await?;
+    assert!(conflicting.is_empty(), "disjoint inputs: no conflict");
+
+    let probe = [uncontested.clone(), contested.clone()];
+    let conflicting = repo.conflicting_inputs(wallet.id, &probe).await?;
+    assert_eq!(conflicting, vec![contested.clone()]);
+
+    // another wallet's session spending the same outpoint does not
+    // count — conflict detection is scoped per wallet
+    let other_wallet = active_wallet();
+    repo.create(propose_with(&other_wallet, vec![uncontested.clone()]))
+        .await?;
+    let conflicting = repo
+        .conflicting_inputs(wallet.id, std::slice::from_ref(&uncontested))
+        .await?;
+    assert!(conflicting.is_empty(), "other wallet's inputs don't count");
+    let conflicting = repo
+        .conflicting_inputs(other_wallet.id, std::slice::from_ref(&uncontested))
+        .await?;
+    assert_eq!(conflicting, vec![uncontested.clone()]);
+
+    // a cancelled session releases its claim on the inputs
+    let released = OutPointRef {
+        txid: bitcoin::Txid::from_byte_array([255; 32]),
+        vout: 2,
+    };
+    let mut doomed = repo
+        .create(propose_with(&wallet, vec![released.clone()]))
+        .await?;
+    let _ = doomed.cancel(UserId::new(), "abandoned".to_string())?;
+    repo.update(&mut doomed).await?;
+    let conflicting = repo.conflicting_inputs(wallet.id, &[released]).await?;
+    assert!(
+        conflicting.is_empty(),
+        "cancelled session releases its claim"
+    );
+
+    Ok(())
+}
