@@ -47,11 +47,6 @@ pub enum PsbtSessionError {
          cap of {max_sats} sats"
     )]
     FeeExceedsMax { fee_sats: u64, max_sats: u64 },
-    #[error("PsbtSessionError - ExpiryInPast: expires_at {expires_at} is not after now ({now})")]
-    ExpiryInPast {
-        expires_at: chrono::DateTime<chrono::Utc>,
-        now: chrono::DateTime<chrono::Utc>,
-    },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,
@@ -71,17 +66,8 @@ pub enum PsbtSessionError {
     NotFinalized(PsbtSessionId),
     #[error("PsbtSessionError - TxidMismatch: observed txid does not match finalized txid")]
     TxidMismatch,
-    #[error("PsbtSessionError - NotYetExpired: session expires at {expires_at}")]
-    NotYetExpired {
-        expires_at: chrono::DateTime<chrono::Utc>,
-    },
     #[error("PsbtSessionError - CannotCancel: session {id} is in status {status}")]
     CannotCancel {
-        id: PsbtSessionId,
-        status: PsbtSessionStatus,
-    },
-    #[error("PsbtSessionError - CannotExpire: session {id} is in status {status}")]
-    CannotExpire {
         id: PsbtSessionId,
         status: PsbtSessionStatus,
     },

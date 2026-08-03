@@ -38,7 +38,6 @@ pub enum PsbtSessionStatus {
     Broadcast,
     Confirmed,
     Invalidated,
-    Expired,
     Cancelled,
 }
 
