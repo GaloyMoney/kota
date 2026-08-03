@@ -1,11 +1,12 @@
 use thiserror::Error;
 
-use core_coordination::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
+use core_coordination::primitives::{PsbtSessionId, UserId, WalletId};
 use core_coordination::psbt::PsbtValidationError;
 use core_coordination::psbt_session::PsbtSessionError;
 use core_coordination::psbt_session::repo::{
     PsbtSessionCreateError, PsbtSessionFindError, PsbtSessionModifyError, PsbtSessionQueryError,
 };
+use core_coordination::storage::BlobFetchError;
 use core_coordination::wallet::WalletError;
 use core_coordination::wallet::repo::{
     WalletCreateError, WalletFindError, WalletModifyError, WalletQueryError,
@@ -51,8 +52,6 @@ pub enum CoordinationError {
          (the creation job has not run)"
     )]
     UnsignedPsbtNotReady(PsbtSessionId),
-    #[error("CoordinationError - BlobMissing: no blob stored at {0}")]
-    BlobMissing(PsbtHash),
-    #[error("CoordinationError - BlobCorrupted: blob at {0} failed digest verification")]
-    BlobCorrupted(PsbtHash),
+    #[error("CoordinationError - BlobFetch: {0}")]
+    BlobFetch(#[from] BlobFetchError),
 }

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bitcoin::{BlockHash, Network, Txid};
 
-use crate::primitives::{PsbtHash, PsbtSessionId};
+use crate::primitives::PsbtSessionId;
 use crate::psbt::PsbtValidationError;
 use crate::psbt_session::{
     InvalidationReason, OutPointRef, PsbtSessionError, PsbtSessionRepo, PsbtSessionStatus,
@@ -100,10 +100,8 @@ pub enum JobsError {
          should never exist for an inactive wallet — this indicates an integrity violation"
     )]
     WalletNotActive(crate::primitives::WalletId),
-    #[error(
-        "JobsError - BlobMissing: content {0} is referenced by the event log but absent from storage"
-    )]
-    BlobMissing(PsbtHash),
+    #[error("JobsError - BlobFetch: {0}")]
+    BlobFetch(#[from] crate::storage::BlobFetchError),
     #[error("JobsError - UnexpectedStatus: session {id} is {status}, expected {expected}")]
     UnexpectedStatus {
         id: PsbtSessionId,

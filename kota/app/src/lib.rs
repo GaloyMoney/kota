@@ -37,7 +37,6 @@ pub use error::CoordinationError;
 
 use std::sync::Arc;
 
-use bitcoin::bip32::Fingerprint as KeyFingerprint;
 use es_entity::clock::ClockHandle;
 use miniscript::descriptor::DescriptorPublicKey;
 use sqlx::PgPool;
@@ -46,13 +45,11 @@ use tracing::instrument;
 use core_coordination::jobs::{
     CoordinationJobSpawners, FinalizationJobConfig, FundingUtxoProvider, PsbtCreationJobConfig,
 };
-use core_coordination::primitives::{
-    DescriptorFingerprint, PsbtHash, PsbtSessionId, UserId, WalletId,
-};
+use core_coordination::primitives::{DescriptorFingerprint, PsbtSessionId, UserId, WalletId};
 use core_coordination::psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission};
 use core_coordination::psbt_session::{NewPsbtSession, PsbtSession, PsbtSessionRepo, SpendSpec};
-use core_coordination::storage::BlobStore;
-use core_coordination::wallet::{NewWallet, Wallet, WalletRepo, keystore_fingerprint};
+use core_coordination::storage::{BlobStore, fetch_verified};
+use core_coordination::wallet::{NewWallet, Wallet, WalletRepo};
 
 /// The coordination service: wallets, signing sessions, and the blobs
 /// that pass between signers and platform.
@@ -242,7 +239,7 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         let hash = session
             .unsigned_psbt_hash()
             .ok_or(CoordinationError::UnsignedPsbtNotReady(session_id))?;
-        self.fetch_blob(&hash).await
+        Ok(fetch_verified(self.blobs.as_ref(), &hash).await?)
     }
 
     /// Submit a signed PSBT on behalf of a participant, then dispatch
@@ -263,14 +260,20 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         signed_psbt: &[u8],
     ) -> Result<PsbtSession, CoordinationError> {
         let mut session = self.sessions.find_by_id(session_id).await?;
-        let fingerprint = self
-            .signer_fingerprint(session.wallet_id, submitted_by)
-            .await?;
+        // signer ↔ keystore binding: the fingerprint is resolved from
+        // the wallet's recorded submissions, never from client input
+        let wallet = self.wallets.find_by_id(session.wallet_id).await?;
+        let fingerprint = wallet.keystore_fingerprint_of(submitted_by).ok_or(
+            CoordinationError::SignerNotBound {
+                wallet_id: wallet.id,
+                user_id: submitted_by,
+            },
+        )?;
 
         let unsigned_hash = session
             .unsigned_psbt_hash()
             .ok_or(CoordinationError::UnsignedPsbtNotReady(session_id))?;
-        let original = parse_psbt(&self.fetch_blob(&unsigned_hash).await?)?;
+        let original = parse_psbt(&fetch_verified(self.blobs.as_ref(), &unsigned_hash).await?)?;
         let signed = parse_psbt(signed_psbt)?;
         let extracted = validate_signed_submission(&original, &signed, &fingerprint)?;
         let merged = merge_partial_sigs(&original, &extracted);
@@ -321,40 +324,6 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         session_id: PsbtSessionId,
     ) -> Result<PsbtSession, CoordinationError> {
         Ok(self.sessions.find_by_id(session_id).await?)
-    }
-
-    // --- internals ---
-
-    /// Resolve the fingerprint the platform may attribute a signature
-    /// to: the keystore `user_id` submitted to this wallet. This is the
-    /// user ↔ keystore binding the aggregates defer to the use-case
-    /// layer.
-    async fn signer_fingerprint(
-        &self,
-        wallet_id: WalletId,
-        user_id: UserId,
-    ) -> Result<KeyFingerprint, CoordinationError> {
-        let wallet = self.wallets.find_by_id(wallet_id).await?;
-        wallet
-            .submissions()
-            .into_iter()
-            .find(|(participant, _)| *participant == user_id)
-            .map(|(_, keystore)| keystore_fingerprint(&keystore))
-            .ok_or(CoordinationError::SignerNotBound { wallet_id, user_id })
-    }
-
-    /// Content-addressed fetch is self-verifying: recompute the digest,
-    /// compare. A mismatch means the storage backend is corrupt.
-    async fn fetch_blob(&self, hash: &PsbtHash) -> Result<Vec<u8>, CoordinationError> {
-        let bytes = self
-            .blobs
-            .get(hash)
-            .await
-            .ok_or(CoordinationError::BlobMissing(*hash))?;
-        if PsbtHash::digest_of(&bytes) != *hash {
-            return Err(CoordinationError::BlobCorrupted(*hash));
-        }
-        Ok(bytes)
     }
 
     /// A UNIQUE fingerprint collision on update means another wallet
