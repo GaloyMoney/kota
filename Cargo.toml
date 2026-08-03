@@ -15,6 +15,8 @@ es-entity = { version = "0.11.11", features = [
     "tracing-context",
     "instrument",
 ] }
+job = { version = "0.6.35", features = ["es-entity"] }
+async-trait = "0.1"
 bitcoin = { version = "0.32", features = ["serde", "base64"] }
 miniscript = { version = "13", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }

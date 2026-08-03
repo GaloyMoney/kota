@@ -19,6 +19,8 @@
 //!   entity (`TxidMismatch`), so a confused or malicious chain-sync
 //!   source cannot attach another transaction's lifecycle to a session.
 
+use std::sync::Arc;
+
 use bitcoin::secp256k1;
 use bitcoin::{BlockHash, Network, Psbt, Txid};
 use miniscript::psbt::PsbtExt;
@@ -32,6 +34,47 @@ use crate::psbt_session::{
 use crate::storage::BlobStore;
 use crate::wallet::repo::WalletFindError;
 use crate::wallet::{FundingUtxo, Wallet, WalletError, WalletRepo, build_unsigned_psbt};
+
+mod finalization;
+mod psbt_creation;
+
+pub use finalization::{FINALIZATION_JOB, FinalizationJobConfig, FinalizationJobInit};
+pub use psbt_creation::{PSBT_CREATION_JOB, PsbtCreationJobConfig, PsbtCreationJobInit};
+
+/// Spawners for the coordination job types, returned by [`register`].
+/// The use-case layer spawns `psbt_creation` when a session is proposed
+/// and `finalization` at every signature upload (it no-ops below
+/// threshold), so the quorum never waits on a polling tick.
+pub struct CoordinationJobSpawners {
+    pub psbt_creation: job::JobSpawner<PsbtCreationJobConfig>,
+    pub finalization: job::JobSpawner<FinalizationJobConfig>,
+}
+
+/// Register the coordination job initializers with the job service.
+/// Call once at startup, before `Jobs::start_poll`.
+pub fn register<B, F>(
+    jobs: &mut job::Jobs,
+    sessions: &PsbtSessionRepo,
+    wallets: &WalletRepo,
+    blobs: Arc<B>,
+    funding: Arc<F>,
+    network: Network,
+) -> CoordinationJobSpawners
+where
+    B: BlobStore + Send + Sync + 'static,
+    F: FundingUtxoProvider + Send + Sync + 'static,
+{
+    CoordinationJobSpawners {
+        psbt_creation: jobs.add_initializer(PsbtCreationJobInit::new(
+            sessions.clone(),
+            wallets.clone(),
+            blobs.clone(),
+            funding,
+            network,
+        )),
+        finalization: jobs.add_initializer(FinalizationJobInit::new(sessions.clone(), blobs)),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobsError {

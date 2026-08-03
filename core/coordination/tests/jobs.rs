@@ -22,7 +22,7 @@ use core_coordination::psbt_session::{
 };
 use core_coordination::storage::{BlobStore, InMemoryBlobStore};
 use core_coordination::wallet::{
-    FundingUtxo, NewWallet, Wallet, WalletRepo, sortedmulti_wsh_descriptor,
+    FundingUtxo, NewWallet, Wallet, WalletRepo, descriptor_fingerprint, sortedmulti_wsh_descriptor,
 };
 
 use bitcoin::bip32::{DerivationPath, Fingerprint as KeyFingerprint, Xpriv, Xpub};
@@ -37,14 +37,16 @@ use std::str::FromStr;
 const NETWORK: Network = Network::Regtest;
 const ACCOUNT_PATH: &str = "m/48'/0'/0'/2'";
 
-fn setup_wallet() -> (
+fn setup_wallet(
+    seed: u8,
+) -> (
     Secp256k1<secp256k1::All>,
     Xpriv,
     Descriptor<DescriptorPublicKey>,
     KeyFingerprint,
 ) {
     let secp = Secp256k1::new();
-    let xpriv = Xpriv::new_master(NETWORK, &[7u8; 64]).unwrap();
+    let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
     let master_fingerprint = xpriv.fingerprint(&secp);
 
     let account_path = DerivationPath::from_str(ACCOUNT_PATH).unwrap();
@@ -65,6 +67,23 @@ fn setup_wallet() -> (
 /// Chain-data double: serves the one funding UTXO the fixture spends.
 struct StaticFunding {
     utxos: Vec<FundingUtxo>,
+}
+
+/// Wallet import is idempotent by design (descriptor fingerprint is a
+/// content address, UNIQUE in the db) — re-registering returns the
+/// existing row, which also keeps these tests re-runnable against the
+/// same dev database.
+async fn ensure_wallet(
+    wallets: &WalletRepo,
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> anyhow::Result<Wallet> {
+    let fingerprint = descriptor_fingerprint(descriptor, NETWORK);
+    if let Ok(wallet) = wallets.find_by_descriptor_fingerprint(fingerprint).await {
+        return Ok(wallet);
+    }
+    Ok(wallets
+        .create(NewWallet::new(WalletId::new(), descriptor, NETWORK))
+        .await?)
 }
 
 impl FundingUtxoProvider for StaticFunding {
@@ -94,12 +113,10 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
     let wallets = WalletRepo::new(&pool, clock);
     let blobs = InMemoryBlobStore::default();
 
-    let (secp, xpriv, descriptor, fingerprint) = setup_wallet();
+    let (secp, xpriv, descriptor, fingerprint) = setup_wallet(7);
 
     // register the wallet
-    let wallet = wallets
-        .create(NewWallet::new(WalletId::new(), &descriptor, NETWORK))
-        .await?;
+    let wallet = ensure_wallet(&wallets, &descriptor).await?;
 
     // one funding UTXO at derivation index 0
     let funding_txid = bitcoin::Txid::from_byte_array([42u8; 32]);
@@ -255,5 +272,134 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
         ))
     ));
 
+    Ok(())
+}
+
+/// The same lifecycle, but driven through the actual `job` executor:
+/// spawn -> poll -> await_completion, exactly as production wiring does.
+#[tokio::test]
+async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set, skipping");
+        return Ok(());
+    };
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let (clock, _ctrl) = ClockHandle::manual();
+    let sessions = PsbtSessionRepo::new(&pool, clock.clone());
+    let wallets = WalletRepo::new(&pool, clock.clone());
+    let blobs = std::sync::Arc::new(InMemoryBlobStore::default());
+
+    let (secp, xpriv, descriptor, fingerprint) = setup_wallet(8);
+    let wallet = ensure_wallet(&wallets, &descriptor).await?;
+
+    let funding_txid = bitcoin::Txid::from_byte_array([43u8; 32]);
+    let funding = vec![FundingUtxo {
+        outpoint: OutPointRef {
+            txid: funding_txid,
+            vout: 0,
+        },
+        txout: TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: descriptor.at_derivation_index(0).unwrap().script_pubkey(),
+        },
+        derivation_index: 0,
+    }];
+    let provider = StaticFunding {
+        utxos: funding.clone(),
+    };
+
+    let destination = descriptor.at_derivation_index(5).unwrap().script_pubkey();
+    let session = sessions
+        .create(NewPsbtSession::try_new(
+            PsbtSessionId::new(),
+            wallet.id,
+            UserId::new(),
+            SpendSpec {
+                inputs: vec![funding[0].outpoint.clone()],
+                outputs: vec![SpendOutput {
+                    address: bitcoin::Address::from_script(&destination, NETWORK)
+                        .unwrap()
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                    amount_sats: 50_000,
+                }],
+                fee_sats: 500,
+                change_output: Some(ChangeOutput {
+                    amount_sats: 49_500,
+                    derivation_index: 1,
+                }),
+            },
+            Policy {
+                threshold: 1,
+                keystores: vec![fingerprint],
+            },
+            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        )?)
+        .await?;
+    let session_id = session.id;
+
+    // register initializers and start the executor — the production wiring
+    let mut jobs = job::Jobs::init(
+        job::JobSvcConfig::builder()
+            .pool(pool.clone())
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    )
+    .await?;
+    let spawners = core_coordination::jobs::register(
+        &mut jobs,
+        &sessions,
+        &wallets,
+        blobs.clone(),
+        std::sync::Arc::new(provider),
+        NETWORK,
+    );
+    jobs.start_poll().await?;
+
+    // spawn PSBT creation; the executor runs it to completion
+    let creation_id = job::JobId::new();
+    spawners
+        .psbt_creation
+        .spawn(
+            creation_id,
+            core_coordination::jobs::PsbtCreationJobConfig { session_id },
+        )
+        .await?;
+    jobs.await_completion(creation_id, Some(std::time::Duration::from_secs(30)))
+        .await?;
+    let session = sessions.find_by_id(session_id).await?;
+    assert_eq!(session.status(), PsbtSessionStatus::Collecting);
+
+    // signer signs; platform validates, rebuilds, stores, records
+    let unsigned_hash = session.unsigned_psbt_hash().unwrap();
+    let unsigned = parse_psbt(&blobs.get(&unsigned_hash).await.unwrap())?;
+    let mut signed = unsigned.clone();
+    signed.sign(&xpriv, &secp).map_err(|(_, e)| e).unwrap();
+    let extracted = validate_signed_submission(&unsigned, &signed, &fingerprint)?;
+    let merged = merge_partial_sigs(&unsigned, &extracted);
+    let merged_hash = blobs.put(&merged.serialize()).await;
+    let mut session = sessions.find_by_id(session_id).await?;
+    let _ = session.add_signature(fingerprint, merged_hash)?;
+    sessions.update(&mut session).await?;
+
+    // spawn finalization; the executor runs it to completion
+    let finalization_id = job::JobId::new();
+    spawners
+        .finalization
+        .spawn(
+            finalization_id,
+            core_coordination::jobs::FinalizationJobConfig { session_id },
+        )
+        .await?;
+    jobs.await_completion(finalization_id, Some(std::time::Duration::from_secs(30)))
+        .await?;
+    let session = sessions.find_by_id(session_id).await?;
+    assert_eq!(session.status(), PsbtSessionStatus::Finalized);
+    assert_eq!(session.finalization().unwrap().sigs_used, vec![fingerprint]);
+
+    jobs.shutdown().await?;
     Ok(())
 }

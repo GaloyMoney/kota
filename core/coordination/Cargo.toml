@@ -8,6 +8,8 @@ workspace = true
 
 [dependencies]
 es-entity.workspace = true
+job.workspace = true
+async-trait.workspace = true
 bitcoin.workspace = true
 miniscript.workspace = true
 serde.workspace = true
