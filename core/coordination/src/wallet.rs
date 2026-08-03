@@ -19,8 +19,8 @@ use bitcoin::{
     transaction::Version,
 };
 use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
-use miniscript::{ForEachKey, Threshold};
 use miniscript::psbt::PsbtExt;
+use miniscript::{ForEachKey, Threshold};
 
 use crate::primitives::DescriptorFingerprint;
 use crate::psbt_session::{OutPointRef, SpendSpec};
