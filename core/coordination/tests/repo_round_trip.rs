@@ -13,7 +13,6 @@ use bitcoin::Network;
 use bitcoin::bip32::{DerivationPath, Fingerprint as KeyFingerprint, Xpriv, Xpub};
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::Secp256k1;
-use chrono::{DateTime, Utc};
 use es_entity::clock::ClockHandle;
 use es_entity::{IntoEvents, TryFromEvents};
 use miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard};
@@ -81,8 +80,6 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
             fee_sats: 500,
             change_output: None,
         },
-        DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
-        DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
     )?;
 
     let mut session = repo.create(new_session).await?;

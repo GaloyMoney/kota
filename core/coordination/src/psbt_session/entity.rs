@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
-use chrono::{DateTime, Utc};
 
 use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 use crate::wallet::{Wallet, WalletStatus, keystore_fingerprint};
@@ -38,7 +37,6 @@ pub enum PsbtSessionEvent {
         change_output: Option<ChangeOutput>,
         threshold: u32,
         keystores: Vec<KeyFingerprint>,
-        expires_at: DateTime<Utc>,
     },
     /// The async PSBT-creation job built the unsigned PSBT from the
     /// `Initialized` data and uploaded it to content-addressed storage.
@@ -75,7 +73,6 @@ pub enum PsbtSessionEvent {
     Invalidated {
         reason: InvalidationReason,
     },
-    Expired {},
     Cancelled {
         reason: String,
     },
@@ -95,7 +92,6 @@ pub struct PsbtSession {
     unsigned_psbt_hash: Option<PsbtHash>,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
-    expires_at: DateTime<Utc>,
     signatures: Vec<SignatureRecord>,
     #[builder(setter(strip_option), default)]
     finalization: Option<FinalizationRecord>,
@@ -110,7 +106,6 @@ impl PsbtSession {
         for event in self.events.iter_all().rev() {
             match event {
                 PsbtSessionEvent::Cancelled { .. } => return PsbtSessionStatus::Cancelled,
-                PsbtSessionEvent::Expired { .. } => return PsbtSessionStatus::Expired,
                 PsbtSessionEvent::Confirmed { .. } => return PsbtSessionStatus::Confirmed,
                 PsbtSessionEvent::Invalidated { .. } => return PsbtSessionStatus::Invalidated,
                 PsbtSessionEvent::BroadcastSeen { .. } => return PsbtSessionStatus::Broadcast,
@@ -133,10 +128,6 @@ impl PsbtSession {
 
     pub fn keystores(&self) -> &[KeyFingerprint] {
         &self.keystores
-    }
-
-    pub fn expires_at(&self) -> DateTime<Utc> {
-        self.expires_at
     }
 
     pub fn signatures(&self) -> &[SignatureRecord] {
@@ -363,33 +354,6 @@ impl PsbtSession {
         Ok(Idempotent::Executed(()))
     }
 
-    /// PSBTs don't expire on-chain; expiry is a platform-level policy to
-    /// bound how long a proposal can collect signatures (fee market drift,
-    /// UTXO availability).
-    pub fn expire(&mut self, now: DateTime<Utc>) -> Result<Idempotent<()>, PsbtSessionError> {
-        idempotency_guard!(
-            self.events.iter_all().rev(),
-            already_applied: PsbtSessionEvent::Expired { .. },
-        );
-        match self.status() {
-            PsbtSessionStatus::Pending | PsbtSessionStatus::Collecting => {}
-            status => {
-                return Err(PsbtSessionError::CannotExpire {
-                    id: self.id,
-                    status,
-                });
-            }
-        }
-        if now < self.expires_at {
-            return Err(PsbtSessionError::NotYetExpired {
-                expires_at: self.expires_at,
-            });
-        }
-
-        self.events.push(PsbtSessionEvent::Expired {});
-        Ok(Idempotent::Executed(()))
-    }
-
     /// Cancellation is only meaningful before broadcast — once the tx is
     /// out, the chain decides. `Finalized` is still cancellable ("do not
     /// broadcast, abandon"), as is a `Pending` session whose PSBT
@@ -434,7 +398,6 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                     change_output,
                     threshold,
                     keystores,
-                    expires_at,
                 } => {
                     builder = builder
                         .id(*id)
@@ -445,8 +408,7 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                         .fee_sats(*fee_sats)
                         .change_output(change_output.clone())
                         .threshold(*threshold)
-                        .keystores(keystores.clone())
-                        .expires_at(*expires_at);
+                        .keystores(keystores.clone());
                 }
                 PsbtSessionEvent::PsbtCreated { unsigned_psbt_hash } => {
                     builder = builder.unsigned_psbt_hash(*unsigned_psbt_hash);
@@ -474,7 +436,6 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                 PsbtSessionEvent::BroadcastSeen { .. }
                 | PsbtSessionEvent::Confirmed { .. }
                 | PsbtSessionEvent::Invalidated { .. }
-                | PsbtSessionEvent::Expired { .. }
                 | PsbtSessionEvent::Cancelled { .. } => {}
             }
         }
@@ -515,7 +476,6 @@ pub struct NewPsbtSession {
     change_output: Option<ChangeOutput>,
     threshold: u32,
     keystores: Vec<KeyFingerprint>,
-    expires_at: DateTime<Utc>,
 }
 
 impl NewPsbtSession {
@@ -537,8 +497,6 @@ impl NewPsbtSession {
         wallet: &Wallet,
         proposed_by: UserId,
         spend: SpendSpec,
-        expires_at: DateTime<Utc>,
-        now: DateTime<Utc>,
     ) -> Result<Self, PsbtSessionError> {
         if wallet.status() != WalletStatus::Active {
             return Err(PsbtSessionError::WalletNotActive {
@@ -582,9 +540,6 @@ impl NewPsbtSession {
                 max_sats: MAX_FEE_SATS,
             });
         }
-        if expires_at <= now {
-            return Err(PsbtSessionError::ExpiryInPast { expires_at, now });
-        }
         debug_assert!(
             threshold > 0 && threshold as usize <= keystores.len(),
             "an active wallet's policy is valid by construction"
@@ -600,7 +555,6 @@ impl NewPsbtSession {
             change_output,
             threshold,
             keystores,
-            expires_at,
         })
     }
 
@@ -627,7 +581,6 @@ impl IntoEvents<PsbtSessionEvent> for NewPsbtSession {
                 change_output: self.change_output,
                 threshold: self.threshold,
                 keystores: self.keystores,
-                expires_at: self.expires_at,
             }],
         )
     }
@@ -678,14 +631,6 @@ mod tests {
         BlockHash::from_byte_array([byte; 32])
     }
 
-    fn expires_at() -> DateTime<Utc> {
-        DateTime::from_timestamp(2_000_000_000, 0).unwrap()
-    }
-
-    fn now() -> DateTime<Utc> {
-        expires_at() - chrono::Duration::days(7)
-    }
-
     fn sample_spend() -> SpendSpec {
         SpendSpec {
             inputs: vec![OutPointRef {
@@ -710,31 +655,15 @@ mod tests {
         PsbtHash::digest_of(b"unsigned-psbt")
     }
 
-    fn propose(
-        wallet: &Wallet,
-        spend: SpendSpec,
-        expires_at: DateTime<Utc>,
-        now: DateTime<Utc>,
-    ) -> Result<NewPsbtSession, PsbtSessionError> {
-        NewPsbtSession::try_new(
-            PsbtSessionId::new(),
-            wallet,
-            UserId::new(),
-            spend,
-            expires_at,
-            now,
-        )
+    fn propose(wallet: &Wallet, spend: SpendSpec) -> Result<NewPsbtSession, PsbtSessionError> {
+        NewPsbtSession::try_new(PsbtSessionId::new(), wallet, UserId::new(), spend)
     }
 
     /// A freshly proposed session: Pending, no PSBT yet.
     fn create_session() -> PsbtSession {
         let wallet = active_wallet(2, &[1, 2, 3]);
-        PsbtSession::try_from_events(
-            propose(&wallet, sample_spend(), expires_at(), now())
-                .unwrap()
-                .into_events(),
-        )
-        .unwrap()
+        PsbtSession::try_from_events(propose(&wallet, sample_spend()).unwrap().into_events())
+            .unwrap()
     }
 
     /// A session whose PSBT-creation job has run: Collecting.
@@ -1022,40 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn expiry_is_platform_policy() {
-        let mut session = create_collecting_session();
-
-        let before_expiry = expires_at() - chrono::Duration::hours(1);
-        assert!(matches!(
-            session.expire(before_expiry),
-            Err(PsbtSessionError::NotYetExpired { .. })
-        ));
-
-        assert!(session.expire(expires_at()).unwrap().did_execute());
-        assert_eq!(session.status(), PsbtSessionStatus::Expired);
-        assert!(session.expire(expires_at()).unwrap().was_already_applied());
-    }
-
-    #[test]
-    fn pending_session_can_expire_too() {
-        let mut session = create_session();
-        assert!(session.expire(expires_at()).unwrap().did_execute());
-        assert_eq!(session.status(), PsbtSessionStatus::Expired);
-    }
-
-    #[test]
-    fn cannot_expire_finalized_session() {
-        let mut session = create_collecting_session();
-        let _ = add_sig(&mut session, 1).unwrap();
-        let _ = add_sig(&mut session, 2).unwrap();
-        finalize(&mut session, vec![fp(1), fp(2)]);
-        assert!(matches!(
-            session.expire(expires_at()),
-            Err(PsbtSessionError::CannotExpire { .. })
-        ));
-    }
-
-    #[test]
     fn cancel_only_before_broadcast() {
         let mut session = create_session();
         // pending (stuck PSBT creation) can be cancelled
@@ -1106,7 +1001,7 @@ mod tests {
             .add_keystore(wallet_keystore(1), participants[0])
             .unwrap();
         assert!(matches!(
-            propose(&wallet, sample_spend(), expires_at(), now()),
+            propose(&wallet, sample_spend()),
             Err(PsbtSessionError::WalletNotActive {
                 status: WalletStatus::CollectingKeystores,
                 ..
@@ -1118,7 +1013,7 @@ mod tests {
             .cancel(participants[0], "abandoned".to_string())
             .unwrap();
         assert!(matches!(
-            propose(&wallet, sample_spend(), expires_at(), now()),
+            propose(&wallet, sample_spend()),
             Err(PsbtSessionError::WalletNotActive {
                 status: WalletStatus::Cancelled,
                 ..
@@ -1129,12 +1024,9 @@ mod tests {
     #[test]
     fn proposal_snapshots_wallet_policy() {
         let wallet = active_wallet(2, &[1, 2, 3]);
-        let session = PsbtSession::try_from_events(
-            propose(&wallet, sample_spend(), expires_at(), now())
-                .unwrap()
-                .into_events(),
-        )
-        .unwrap();
+        let session =
+            PsbtSession::try_from_events(propose(&wallet, sample_spend()).unwrap().into_events())
+                .unwrap();
         assert_eq!(session.wallet_id, wallet.id);
         assert_eq!(session.threshold(), 2);
         assert_eq!(session.keystores(), &[fp(1), fp(2), fp(3)]);
@@ -1147,7 +1039,7 @@ mod tests {
         let dup = spend.inputs[0].clone();
         spend.inputs.push(dup.clone());
         assert!(matches!(
-            propose(&wallet, spend, expires_at(), now()),
+            propose(&wallet, spend),
             Err(PsbtSessionError::DuplicateInput { txid, vout }) if txid == dup.txid && vout == dup.vout
         ));
     }
@@ -1158,28 +1050,8 @@ mod tests {
         let mut spend = sample_spend();
         spend.fee_sats = MAX_FEE_SATS + 1;
         assert!(matches!(
-            propose(&wallet, spend, expires_at(), now()),
+            propose(&wallet, spend),
             Err(PsbtSessionError::FeeExceedsMax { .. })
-        ));
-    }
-
-    #[test]
-    fn expiry_in_past_rejected() {
-        let wallet = active_wallet(2, &[1, 2]);
-        // equal to now
-        assert!(matches!(
-            propose(&wallet, sample_spend(), now(), now()),
-            Err(PsbtSessionError::ExpiryInPast { .. })
-        ));
-        // before now
-        assert!(matches!(
-            propose(
-                &wallet,
-                sample_spend(),
-                now() - chrono::Duration::seconds(1),
-                now(),
-            ),
-            Err(PsbtSessionError::ExpiryInPast { .. })
         ));
     }
 
@@ -1190,14 +1062,14 @@ mod tests {
         let mut spend = sample_spend();
         spend.inputs = vec![];
         assert!(matches!(
-            propose(&wallet, spend, expires_at(), now()),
+            propose(&wallet, spend),
             Err(PsbtSessionError::EmptyInputs)
         ));
 
         let mut spend = sample_spend();
         spend.outputs = vec![];
         assert!(matches!(
-            propose(&wallet, spend, expires_at(), now()),
+            propose(&wallet, spend),
             Err(PsbtSessionError::EmptyOutputs)
         ));
     }

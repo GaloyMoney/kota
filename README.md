@@ -56,9 +56,9 @@ event-sourced PSBT signing-session lifecycle.
     from the wallet descriptor and fills the PSBT output map, since
     signing devices cannot be relied on to verify multisig change.
   - Events: `Initialized`, `PsbtCreated`, `SignatureAdded`, `Finalized`,
-    `BroadcastSeen`, `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
-  - Two causality streams: user commands (signature collection, cancel,
-    expire) and chain-sync observations (broadcast/confirm/invalidate),
+    `BroadcastSeen`, `Confirmed`, `Invalidated`, `Cancelled`.
+  - Two causality streams: user commands (signature collection, cancel)
+    and chain-sync observations (broadcast/confirm/invalidate),
     kept separate — chain events must match the finalized txid.
   - Reorg-safe: `confirm`/`invalidate` guards use
     `idempotency_guard!(.., resets_on: ..)` so
@@ -68,8 +68,7 @@ event-sourced PSBT signing-session lifecycle.
   - Per-signer idempotent signature upload (guard on signer fingerprint).
   - Policy validity is guaranteed by construction: the snapshot is
     derived from an `Active` wallet, whose own aggregate already
-    enforced quorum sanity. Session-level signature-collection
-    deadline (`expires_at`).
+    enforced quorum sanity.
   - `EsRepo` with a strum↔VARCHAR sqlx shim for the status column.
 - **`psbt` module** — `validate_signed_submission`: verifies a
   signer-submitted PSBT is the original unsigned PSBT plus *only* additive

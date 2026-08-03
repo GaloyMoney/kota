@@ -171,7 +171,7 @@ where
                 Ok(JobCompletion::Complete)
             }
             // The session moved on between spawn and execution (cancelled,
-            // expired, broadcast by a previous run, ...). It will never
+            // or broadcast by a previous run, ...). It will never
             // become finalizable again, so retrying is pointless — complete
             // as a no-op instead of poisoning the retry queue.
             Err(JobsError::UnexpectedStatus { status, .. }) => {
