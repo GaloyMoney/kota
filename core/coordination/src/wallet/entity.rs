@@ -234,10 +234,9 @@ impl Wallet {
             .submissions()
             .into_iter()
             .find(|(participant, _)| *participant == submitted_by)
+            && existing == keystore
         {
-            if existing == keystore {
-                return Ok(Idempotent::AlreadyApplied);
-            }
+            return Ok(Idempotent::AlreadyApplied);
         }
         match self.status() {
             WalletStatus::CollectingKeystores => {}
