@@ -43,9 +43,7 @@ pub enum PsbtSessionEvent {
     /// The async PSBT-creation job built the unsigned PSBT from the
     /// `Initialized` data and uploaded it to content-addressed storage.
     /// Transitions the session from Pending to Collecting.
-    PsbtCreated {
-        unsigned_psbt_hash: PsbtHash,
-    },
+    PsbtCreated { unsigned_psbt_hash: PsbtHash },
     /// A signer submitted a signed PSBT that passed additive-only
     /// validation (see `crate::psbt`). Collected ≠ used: more signatures
     /// than the threshold may be collected.
@@ -62,9 +60,7 @@ pub enum PsbtSessionEvent {
         sigs_used: Vec<KeyFingerprint>,
     },
     /// Chain sync observed the finalized tx in the mempool / a block.
-    BroadcastSeen {
-        txid: Txid,
-    },
+    BroadcastSeen { txid: Txid },
     Confirmed {
         txid: Txid,
         height: u64,
@@ -72,10 +68,13 @@ pub enum PsbtSessionEvent {
     },
     /// Chain-observed reversal — reorg, external spend of inputs, RBF
     /// replacement. Chain states are never terminal.
-    Invalidated {
-        reason: InvalidationReason,
-    },
+    Invalidated { reason: InvalidationReason },
     Cancelled {
+        /// User who cancelled the proposal (platform-attributed — like
+        /// `proposed_by`, no cryptographic evidence exists). The audit
+        /// trail answers "who abandoned this spend?" the same way it
+        /// answers "who proposed it?".
+        cancelled_by: UserId,
         reason: String,
     },
 }
@@ -360,7 +359,11 @@ impl PsbtSession {
     /// out, the chain decides. `Finalized` is still cancellable ("do not
     /// broadcast, abandon"), as is a `Pending` session whose PSBT
     /// creation is stuck.
-    pub fn cancel(&mut self, reason: String) -> Result<Idempotent<()>, PsbtSessionError> {
+    pub fn cancel(
+        &mut self,
+        cancelled_by: UserId,
+        reason: String,
+    ) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: PsbtSessionEvent::Cancelled { .. },
@@ -377,7 +380,10 @@ impl PsbtSession {
             }
         }
 
-        self.events.push(PsbtSessionEvent::Cancelled { reason });
+        self.events.push(PsbtSessionEvent::Cancelled {
+            cancelled_by,
+            reason,
+        });
         Ok(Idempotent::Executed(()))
     }
 }
@@ -818,7 +824,9 @@ mod tests {
     #[test]
     fn cannot_attach_psbt_after_cancel() {
         let mut session = create_session();
-        let _ = session.cancel("gave up".to_string()).unwrap();
+        let _ = session
+            .cancel(UserId::new(), "gave up".to_string())
+            .unwrap();
         assert!(matches!(
             session.record_psbt_created(unsigned_psbt_hash()),
             Err(PsbtSessionError::CannotAttachPsbt { .. })
@@ -926,7 +934,9 @@ mod tests {
         ));
 
         let mut session = create_collecting_session();
-        let _ = session.cancel("changed mind".to_string()).unwrap();
+        let _ = session
+            .cancel(UserId::new(), "changed mind".to_string())
+            .unwrap();
         assert!(matches!(
             add_sig(&mut session, 1),
             Err(PsbtSessionError::NotCollecting(_))
@@ -1037,14 +1047,14 @@ mod tests {
         // pending (stuck PSBT creation) can be cancelled
         assert!(
             session
-                .cancel("no longer needed".to_string())
+                .cancel(UserId::new(), "no longer needed".to_string())
                 .unwrap()
                 .did_execute()
         );
         assert_eq!(session.status(), PsbtSessionStatus::Cancelled);
         assert!(
             session
-                .cancel("again".to_string())
+                .cancel(UserId::new(), "again".to_string())
                 .unwrap()
                 .was_already_applied()
         );
@@ -1054,7 +1064,12 @@ mod tests {
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         finalize(&mut session, vec![fp(1), fp(2)]);
-        assert!(session.cancel("abandon".to_string()).unwrap().did_execute());
+        assert!(
+            session
+                .cancel(UserId::new(), "abandon".to_string())
+                .unwrap()
+                .did_execute()
+        );
 
         // once broadcast, the chain decides
         let mut session = create_collecting_session();
@@ -1063,7 +1078,7 @@ mod tests {
         finalize(&mut session, vec![fp(1), fp(2)]);
         let _ = session.mark_broadcast_seen(dummy_txid(1)).unwrap();
         assert!(matches!(
-            session.cancel("too late".to_string()),
+            session.cancel(UserId::new(), "too late".to_string()),
             Err(PsbtSessionError::CannotCancel { .. })
         ));
     }
