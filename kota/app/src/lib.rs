@@ -215,16 +215,22 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
             now + self.config.proposal_ttl,
             now,
         )?;
-        let session = self.sessions.create(new_session).await?;
+        // Session events and the PSBT-creation job row commit
+        // atomically: a crash between them would leave the session
+        // Pending forever with no job enqueued to build its PSBT.
+        let mut op = self.sessions.begin_op().await?;
+        let session = self.sessions.create_in_op(&mut op, new_session).await?;
         self.spawners
             .psbt_creation
-            .spawn(
+            .spawn_in_op(
+                &mut op,
                 job::JobId::new(),
                 PsbtCreationJobConfig {
                     session_id: session.id,
                 },
             )
             .await?;
+        op.commit().await?;
         Ok(session)
     }
 
@@ -279,22 +285,30 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         let merged = merge_partial_sigs(&original, &extracted);
         let merged_hash = self.blobs.put(&merged.serialize()).await;
 
+        // Signature events and the finalization job row commit
+        // atomically: a crash between them could leave a quorum-met
+        // session stuck in Collecting with no job ever enqueued. The
+        // spawn also runs on idempotent retries — the first attempt may
+        // have died before reaching it; the job no-ops when there is
+        // nothing to finalize.
+        let mut op = self.sessions.begin_op().await?;
         if session
             .add_signature(fingerprint, merged_hash)?
-            .was_already_applied()
+            .did_execute()
         {
-            return Ok(session);
+            self.sessions.update_in_op(&mut op, &mut session).await?;
         }
-        self.sessions.update(&mut session).await?;
         self.spawners
             .finalization
-            .spawn(
+            .spawn_in_op(
+                &mut op,
                 job::JobId::new(),
                 FinalizationJobConfig {
                     session_id: session.id,
                 },
             )
             .await?;
+        op.commit().await?;
         Ok(session)
     }
 

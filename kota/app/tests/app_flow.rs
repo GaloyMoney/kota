@@ -67,6 +67,7 @@ impl FundingUtxoProvider for StaticFunding {
 
 struct Fixture {
     app: Coordination<InMemoryBlobStore>,
+    pool: sqlx::PgPool,
     jobs: job::Jobs,
     blobs: Arc<InMemoryBlobStore>,
     funding: StaticFunding,
@@ -124,6 +125,7 @@ impl Fixture {
             .unzip();
         Some(Self {
             app,
+            pool,
             jobs,
             blobs,
             funding,
@@ -260,6 +262,17 @@ async fn full_spend_flow_through_use_cases() -> anyhow::Result<()> {
         .submit_signed_psbt(session.id, fixture.participants[0], &signed.serialize())
         .await?;
     assert_eq!(after.signature_count(), 2);
+
+    // regression: the idempotent re-upload still enqueues finalization
+    // — the first attempt may have persisted the signature and then
+    // died before spawning (crash / job-insert error). 2 uploads + 1
+    // re-upload = 3 finalization jobs.
+    let finalization_jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jobs WHERE job_type = 'coordination.finalization'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(finalization_jobs, 3);
 
     // the finalization job (spawned at every upload) recomputes the
     // final tx once quorum is met
