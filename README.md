@@ -8,159 +8,48 @@ coordinates the quorum and keeps an immutable audit trail of who did what.
 This repo is early scaffolding: one Rust workspace member implementing the
 event-sourced PSBT signing-session lifecycle.
 
-## Current state
+## `core/coordination` crate
 
-### `core/coordination` crate
+- **`wallet`** — the `Wallet` aggregate (policy registration → keystore
+  collection → activation, content-addressed by descriptor fingerprint)
+  plus wallet-side bitcoin logic (descriptor construction, PSBT building).
+- **`psbt_session`** — the `PsbtSession` aggregate: propose → collect
+  signatures → finalize → broadcast → confirm, reorg-safe, with separate
+  causality streams for user commands and chain-sync observations.
+- **`app`** — the use-case layer (`Coordination` service, lana pattern):
+  commands that drive the aggregates, spawn the jobs, and enforce the
+  bindings the aggregates defer (signer ↔ keystore, idempotent wallet
+  import).
+- **`jobs`** — idempotent async job units (PSBT creation, finalization,
+  chain observations) with `job`-crate scheduling adapters.
+- **`psbt`** — additive-only validation of signer-submitted PSBTs.
+- **`storage`** — content-addressed `BlobStore` trait; in-memory impl for
+  tests, GCS/filesystem backends to come.
+- **`primitives`** — entity ids and `PsbtHash` (SHA-256 content address).
 
-- **`wallet` module** — the `Wallet` aggregate plus wallet-side bitcoin
-  logic (descriptor construction, PSBT building). A wallet is *not* born
-  with its descriptor: `Initialized` registers only the policy — an
-  N-of-M `threshold` over a named set of `participants`, on a network —
-  and each participant then submits exactly one keystore
-  (`KeystoreAdded`). The aggregate enforces participant binding: a
-  non-participant cannot submit, resubmission of the identical key is
-  idempotent, a different key requires an explicit `KeystoreRemoved`
-  first (pre-activation replacement, e.g. a wrong xpub), and master
-  fingerprints must be distinct across participants. The final keystore
-  atomically derives the canonical `wsh(sortedmulti(NofM))` descriptor
-  (`Activated`). Until then the wallet is `CollectingKeystores` — no
-  address space, no spends. A wallet stuck collecting can be abandoned
-  (`Cancelled`, pre-activation only; terminal). Wallet identity is two-layered: `WalletId`
-  is a framework-internal UUID, while `descriptor_fingerprint` is the
-  deterministic content address (SHA-256) of (network, canonical
-  descriptor) — NULL until activation, UNIQUE thereafter, so two wallets
-  converging on the same descriptor collide at activation and the
-  use-case layer turns that into an idempotent find. Descriptors are
-  canonicalized at derivation (`sortedmulti_wsh_descriptor` sorts
-  keystores) so submission order never affects the fingerprint.
-- **`psbt_session` module** — the `PsbtSession` aggregate (`es-entity`):
-  - Vocabulary follows Sparrow: a session belongs to a **Wallet** and
-    snapshots the wallet's **Policy** (N-of-M `threshold` over
-    `keystores`, identified by their master fingerprints) at creation.
-    Proposal is gated on the wallet: `NewPsbtSession::try_new` takes
-    the `Wallet` aggregate and rejects anything that is not `Active`
-    (a wallet still collecting keystores, or a cancelled one, has no
-    descriptor and cannot spend). Anyone in the wallet can propose a spend. Actor attribution is split
-    by evidence: `proposed_by` is a `UserId` (a platform-attributed
-    business fact), while signatures are attributed to keystore
-    fingerprints (independently verifiable against the stored PSBT
-    blobs). The user ↔ keystore binding is enforced at the use-case
-    layer via the future user crate.
-  - Proposal and PSBT creation are decoupled: `Initialized` carries a
-    denormalized `SpendSpec` (inputs as outpoints, outputs, fee, change)
-    and the session starts `Pending`; an async job builds the unsigned
-    PSBT from the spec, uploads it to content-addressed storage, and
-    appends `PsbtCreated` with the hash — only then does signature
-    collection open (`Collecting`). Change is specified as a descriptor
-    derivation index, not an address: the job derives the change address
-    from the wallet descriptor and fills the PSBT output map, since
-    signing devices cannot be relied on to verify multisig change.
-  - Events: `Initialized`, `PsbtCreated`, `SignatureAdded`, `Finalized`,
-    `BroadcastSeen`, `Confirmed`, `Invalidated`, `Expired`, `Cancelled`.
-  - Two causality streams: user commands (signature collection, cancel,
-    expire) and chain-sync observations (broadcast/confirm/invalidate),
-    kept separate — chain events must match the finalized txid.
-  - Reorg-safe: `confirm`/`invalidate` guards use
-    `idempotency_guard!(.., resets_on: ..)` so
-    `Confirmed → Invalidated → Confirmed` re-executes correctly.
-  - Collected ≠ used: over-signing is allowed while collecting; `Finalized`
-    records exactly which `sigs_used` authorized the spend.
-  - Per-signer idempotent signature upload (guard on signer fingerprint).
-  - Policy validity is guaranteed by construction: the snapshot is
-    derived from an `Active` wallet, whose own aggregate already
-    enforced quorum sanity. Session-level signature-collection
-    deadline (`expires_at`).
-  - `EsRepo` with a strum↔VARCHAR sqlx shim for the status column.
-- **`psbt` module** — `validate_signed_submission`: verifies a
-  signer-submitted PSBT is the original unsigned PSBT plus *only* additive
-  partial signatures (unsigned tx immutable, no cosigner sigs stripped).
-  Two `TODO(security)` items are flagged: binding new signatures to the
-  submitter's fingerprint via bip32 key sources, and asserting immutability
-  of non-signature PSBT fields.
-- **`wallet` module** — the bitcoin-side logic the PSBT-creation job runs:
-  `sortedmulti_wsh_descriptor` builds the `wsh(sortedmulti(NofM))`
-  descriptor from keystores, `build_unsigned_psbt` constructs the unsigned
-  PSBT from a `SpendSpec` + funding UTXOs (validates amounts balance,
-  fills `witness_utxo`/`witness_script`/`bip32_derivation` via
-  `rust-miniscript`), `descriptor_fingerprints` cross-checks a descriptor
-  against a session's policy.
-- **`jobs` module** — the async job units that drive the session
-  lifecycle, each one idempotent load-aggregate/do-work/persist
-  function with a thin `job`-crate scheduling adapter (lana
-  conventions): `run_psbt_creation` builds the unsigned PSBT
-  platform-side from the recorded `SpendSpec` + wallet descriptor +
-  chain data (never accepted from the proposer; chain data enters via
-  the `FundingUtxoProvider` trait), `run_finalization` recomputes the
-  final tx from the original unsigned PSBT plus the platform-built
-  merged signature blobs (signer-submitted documents are never loaded
-  back), `apply_chain_observation` folds chain-sync observations into
-  the lifecycle. `jobs::register` wires the initializers into a
-  `job::Jobs` executor.
-- **`app` module** — the use-case layer (`Coordination` service, lana
-  pattern): commands that drive the aggregates and spawn the jobs
-  (`propose_spend` → PSBT creation, every signature upload →
-  finalization, so the quorum never waits on a poll tick). This is
-  where the bindings the aggregates deliberately defer get enforced:
-  the signer ↔ keystore binding for signature submission (the
-  attributed fingerprint is resolved from the wallet's recorded
-  submissions, never from client input) and idempotent wallet import
-  (a UNIQUE fingerprint collision at activation resolves to a find of
-  the existing wallet). `init` takes `&mut job::Jobs` and registers
-  the initializers, mirroring lana's module init convention.
-- **`storage` module** — the `BlobStore` content-addressed storage trait
-  (`put`/`get`/`delete` by hash) with an `InMemoryBlobStore` for tests;
-  GCS/local-filesystem backends to come.
-- **`primitives` module** — `entity_id!` ids (`PsbtSessionId`, `WalletId`)
-  and `PsbtHash` (SHA-256 content address). PSBT/transaction blobs live in
-  dumb content-addressed storage keyed by hash; the event log is the only
-  index of which hashes exist and what they mean. Every fetch is
-  self-verifying (recompute the digest, compare).
+Module-level doc comments carry the details; the README stays a map.
 
-### Persistence
+## Persistence
 
-- Migrations: `core_wallets` + `core_wallet_events`,
-  `core_psbt_sessions` + `core_psbt_session_events`
-  (es-entity conventions).
+- Migrations for the `job` crate tables plus `core_wallets` /
+  `core_psbt_sessions` and their event tables (es-entity conventions).
 - `.sqlx/` offline query cache checked in — the workspace compiles without
   a database.
-
-### Tests
-
-- 48 entity unit tests covering the wallet and session state machines,
-  idempotency guards, participant binding, keystore replacement, and
-  reorg handling — no DB needed.
-- End-to-end cryptographic tests (`core/coordination/tests/e2e_signing.rs`)
-  running the full flow with real keys: propose -> build unsigned PSBT
-  from the spec -> store/fetch by content hash -> sign with a real
-  `Xpriv` -> additive-only validation -> finalize -> ECDSA verification
-  of the witness against the funding script. Plus negative cases:
-  tampered unsigned tx and stripped cosigner signatures are rejected.
-- Use-case integration tests (`core/coordination/tests/app_flow.rs`):
-  the full flow through `Coordination` commands with the real `job`
-  executor running (spawn -> poll -> execute) — each test gets its own
-  database, so they parallelize safely.
-- Job and repo integration tests (`core/coordination/tests/jobs.rs`,
-  `*_round_trip.rs`). All DB-backed tests are skipped unless
-  `DATABASE_URL` points at a postgres server.
-- `bats bats/e2e.bats` — end-to-end smoke test: boots a dedicated
-  postgres (own port/data dir), runs migrations, then runs fmt,
-  clippy, and the full test suite against it.
 
 ## Development
 
 With nix + direnv (recommended): `direnv allow` drops you into a shell
-with the Rust toolchain (from `rust-toolchain.toml`), `sqlx-cli`,
-`cargo-nextest`, and postgres, and sets a directory-scoped
-`DATABASE_URL`.
+with the Rust toolchain, `sqlx-cli`, `bats`, and postgres, and sets a
+directory-scoped `DATABASE_URL`.
 
 ```sh
 ./dev/bin/pg-start.sh           # local postgres on :5441 + migrations (stop: pg-stop.sh)
                                 # PGPORT/PGDATABASE/PGDATA overridable for parallel clones
-SQLX_OFFLINE=true cargo test    # all tests, incl. repo round-trip against local pg
+SQLX_OFFLINE=true cargo test    # unit tests; DB-backed tests skip without DATABASE_URL
 bats bats/e2e.bats              # full e2e smoke: dedicated pg, migrations, fmt+clippy+tests
 
 cargo sqlx prepare --workspace  # regenerate .sqlx offline cache (needs running pg)
 ```
 
-Without nix, install the toolchain manually; the integration test skips
-itself when `DATABASE_URL` is unset.
+Without nix, install the toolchain manually; DB-backed tests skip
+themselves when `DATABASE_URL` is unset.
