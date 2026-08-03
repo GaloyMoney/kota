@@ -122,11 +122,12 @@ pub struct DescriptorFingerprintParseError;
 /// A syntactically valid bitcoin address (network-unchecked).
 ///
 /// Parsing happens at the boundary (proposal time), so malformed
-/// addresses never enter the event stream. The network check is
-/// deliberately deferred: the coordination module is single-network
-/// per instance (network arrives as a parameter, like lana's
-/// module-level config), so `require_network` is called where the
-/// network is known — e.g. `build_unsigned_psbt`.
+/// addresses never enter the event stream. The network check is a
+/// separate step because the type is parsed before the wallet (and its
+/// network) is necessarily in scope; `require_network` is called where
+/// the network is known — at proposal time in
+/// `NewPsbtSession::try_new`, and again as defense-in-depth in
+/// `build_unsigned_psbt`.
 ///
 /// Serializes transparently as the address string: the persisted event
 /// representation is identical to the previous plain `String` field.
