@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core/coordination"]
+members = ["core/coordination", "kota/app"]
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [] }

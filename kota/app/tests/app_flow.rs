@@ -7,7 +7,6 @@
 //! its own test's database. Skipped unless DATABASE_URL is set.
 
 use core_coordination::{
-    app::{Coordination, CoordinationConfig, CoordinationError},
     jobs::{FundingUtxoProvider, JobsError},
     primitives::*,
     psbt::parse_psbt,
@@ -18,6 +17,7 @@ use core_coordination::{
     storage::{BlobStore, InMemoryBlobStore},
     wallet::{FundingUtxo, Wallet, WalletError, WalletStatus},
 };
+use kota_app::{Coordination, CoordinationConfig, CoordinationError};
 
 use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
 use bitcoin::hashes::Hash;

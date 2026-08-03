@@ -1,0 +1,23 @@
+[package]
+name = "kota-app"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+core-coordination = { path = "../../core/coordination" }
+es-entity.workspace = true
+bitcoin.workspace = true
+miniscript.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+job.workspace = true
+
+[dev-dependencies]
+anyhow = "1.0"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }

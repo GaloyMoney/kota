@@ -1,13 +1,13 @@
 use thiserror::Error;
 
-use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
-use crate::psbt::PsbtValidationError;
-use crate::psbt_session::PsbtSessionError;
-use crate::psbt_session::repo::{
+use core_coordination::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
+use core_coordination::psbt::PsbtValidationError;
+use core_coordination::psbt_session::PsbtSessionError;
+use core_coordination::psbt_session::repo::{
     PsbtSessionCreateError, PsbtSessionFindError, PsbtSessionModifyError, PsbtSessionQueryError,
 };
-use crate::wallet::WalletError;
-use crate::wallet::repo::{
+use core_coordination::wallet::WalletError;
+use core_coordination::wallet::repo::{
     WalletCreateError, WalletFindError, WalletModifyError, WalletQueryError,
 };
 

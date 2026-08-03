@@ -1,4 +1,5 @@
-//! The use-case layer: commands that drive the aggregates.
+//! The kota application layer: use-case commands that drive the
+//! `core-coordination` domain.
 //!
 //! Follows the lana pattern at kota's current scale: a single service
 //! struct ([`Coordination`]) holding the repos, the blob store, the job
@@ -21,7 +22,7 @@
 //! spawns PSBT creation, and every signature upload spawns
 //! finalization (which no-ops below threshold), so the quorum never
 //! waits on a polling tick. The job units themselves live in
-//! [`crate::jobs`].
+//! [`core_coordination::jobs`].
 //!
 //! Lana patterns deliberately *not* adopted yet: `sub: Subject` +
 //! authz (needs the user crate), `_in_op` variants (no cross-aggregate
@@ -42,14 +43,16 @@ use miniscript::descriptor::DescriptorPublicKey;
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::jobs::{
+use core_coordination::jobs::{
     CoordinationJobSpawners, FinalizationJobConfig, FundingUtxoProvider, PsbtCreationJobConfig,
 };
-use crate::primitives::{DescriptorFingerprint, PsbtHash, PsbtSessionId, UserId, WalletId};
-use crate::psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission};
-use crate::psbt_session::{NewPsbtSession, PsbtSession, PsbtSessionRepo, SpendSpec};
-use crate::storage::BlobStore;
-use crate::wallet::{NewWallet, Wallet, WalletRepo, keystore_fingerprint};
+use core_coordination::primitives::{
+    DescriptorFingerprint, PsbtHash, PsbtSessionId, UserId, WalletId,
+};
+use core_coordination::psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission};
+use core_coordination::psbt_session::{NewPsbtSession, PsbtSession, PsbtSessionRepo, SpendSpec};
+use core_coordination::storage::BlobStore;
+use core_coordination::wallet::{NewWallet, Wallet, WalletRepo, keystore_fingerprint};
 
 /// The coordination service: wallets, signing sessions, and the blobs
 /// that pass between signers and platform.
@@ -93,7 +96,7 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         let clock = jobs.clock().clone();
         let wallets = WalletRepo::new(pool, clock.clone());
         let sessions = PsbtSessionRepo::new(pool, clock.clone());
-        let spawners = crate::jobs::register(
+        let spawners = core_coordination::jobs::register(
             jobs,
             &sessions,
             &wallets,
@@ -249,7 +252,7 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
     /// signature is resolved from the wallet's recorded submissions for
     /// `submitted_by` — a client cannot claim another keystore's
     /// fingerprint. Validation (additive-only, complete, bound to the
-    /// signer's keys, SIGHASH_ALL) happens in `crate::psbt`; only the
+    /// signer's keys, SIGHASH_ALL) happens in `core_coordination::psbt`; only the
     /// extracted signatures, merged onto the original document, are
     /// stored — never the submitted blob itself.
     #[instrument(name = "coordination.submit_signed_psbt", skip(self, signed_psbt))]
