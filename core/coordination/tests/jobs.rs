@@ -17,8 +17,8 @@ use core_coordination::jobs::{
 use core_coordination::primitives::*;
 use core_coordination::psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission};
 use core_coordination::psbt_session::{
-    ChangeOutput, NewPsbtSession, OutPointRef, Policy, PsbtSessionRepo, PsbtSessionStatus,
-    SpendOutput, SpendSpec,
+    ChangeOutput, NewPsbtSession, OutPointRef, PsbtSessionRepo, PsbtSessionStatus, SpendOutput,
+    SpendSpec,
 };
 use core_coordination::storage::{BlobStore, InMemoryBlobStore};
 use core_coordination::wallet::{
@@ -44,6 +44,7 @@ fn setup_wallet(
     Xpriv,
     Descriptor<DescriptorPublicKey>,
     KeyFingerprint,
+    DescriptorPublicKey,
 ) {
     let secp = Secp256k1::new();
     let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
@@ -59,9 +60,9 @@ fn setup_wallet(
         derivation_path: DerivationPath::from_str("m/0").unwrap(),
         wildcard: Wildcard::Unhardened,
     });
-    let descriptor = sortedmulti_wsh_descriptor(1, vec![keystore]).unwrap();
+    let descriptor = sortedmulti_wsh_descriptor(1, vec![keystore.clone()]).unwrap();
 
-    (secp, xpriv, descriptor, master_fingerprint)
+    (secp, xpriv, descriptor, master_fingerprint, keystore)
 }
 
 /// Chain-data double: serves the one funding UTXO the fixture spends.
@@ -72,18 +73,33 @@ struct StaticFunding {
 /// Wallet import is idempotent by design (descriptor fingerprint is a
 /// content address, UNIQUE in the db) — re-registering returns the
 /// existing row, which also keeps these tests re-runnable against the
-/// same dev database.
+/// same dev database. Otherwise the full lifecycle runs: policy
+/// registration, keystore submission, activation.
 async fn ensure_wallet(
     wallets: &WalletRepo,
     descriptor: &Descriptor<DescriptorPublicKey>,
+    keystore: &DescriptorPublicKey,
 ) -> anyhow::Result<Wallet> {
     let fingerprint = descriptor_fingerprint(descriptor, NETWORK);
-    if let Ok(wallet) = wallets.find_by_descriptor_fingerprint(fingerprint).await {
+    if let Ok(wallet) = wallets
+        .find_by_descriptor_fingerprint(Some(fingerprint))
+        .await
+    {
         return Ok(wallet);
     }
-    Ok(wallets
-        .create(NewWallet::new(WalletId::new(), descriptor, NETWORK))
-        .await?)
+    let participant = UserId::new();
+    let mut wallet = wallets
+        .create(NewWallet::new(
+            WalletId::new(),
+            NETWORK,
+            1,
+            vec![participant],
+        )?)
+        .await?;
+    let _ = wallet.add_keystore(keystore.clone(), participant)?;
+    wallets.update(&mut wallet).await?;
+    assert_eq!(wallet.descriptor(), Some(descriptor));
+    Ok(wallet)
 }
 
 impl FundingUtxoProvider for StaticFunding {
@@ -113,10 +129,10 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
     let wallets = WalletRepo::new(&pool, clock);
     let blobs = InMemoryBlobStore::default();
 
-    let (secp, xpriv, descriptor, fingerprint) = setup_wallet(7);
+    let (secp, xpriv, descriptor, fingerprint, keystore) = setup_wallet(7);
 
-    // register the wallet
-    let wallet = ensure_wallet(&wallets, &descriptor).await?;
+    // register the wallet (policy + keystore -> Active)
+    let wallet = ensure_wallet(&wallets, &descriptor, &keystore).await?;
 
     // one funding UTXO at derivation index 0
     let funding_txid = bitcoin::Txid::from_byte_array([42u8; 32]);
@@ -156,13 +172,9 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
     let session = sessions
         .create(NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            wallet.id,
+            &wallet,
             UserId::new(),
             spec,
-            Policy {
-                threshold: 1,
-                keystores: vec![fingerprint],
-            },
             DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
@@ -289,8 +301,8 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
     let wallets = WalletRepo::new(&pool, clock.clone());
     let blobs = std::sync::Arc::new(InMemoryBlobStore::default());
 
-    let (secp, xpriv, descriptor, fingerprint) = setup_wallet(8);
-    let wallet = ensure_wallet(&wallets, &descriptor).await?;
+    let (secp, xpriv, descriptor, fingerprint, keystore) = setup_wallet(8);
+    let wallet = ensure_wallet(&wallets, &descriptor, &keystore).await?;
 
     let funding_txid = bitcoin::Txid::from_byte_array([43u8; 32]);
     let funding = vec![FundingUtxo {
@@ -312,7 +324,7 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
     let session = sessions
         .create(NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            wallet.id,
+            &wallet,
             UserId::new(),
             SpendSpec {
                 inputs: vec![funding[0].outpoint.clone()],
@@ -329,10 +341,6 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
                     amount_sats: 49_500,
                     derivation_index: 1,
                 }),
-            },
-            Policy {
-                threshold: 1,
-                keystores: vec![fingerprint],
             },
             DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
@@ -418,15 +426,15 @@ async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
     let wallets = WalletRepo::new(&pool, clock.clone());
     let blobs = std::sync::Arc::new(InMemoryBlobStore::default());
 
-    let (_, _, descriptor, fingerprint) = setup_wallet(9);
-    let wallet = ensure_wallet(&wallets, &descriptor).await?;
+    let (_, _, descriptor, _, keystore) = setup_wallet(9);
+    let wallet = ensure_wallet(&wallets, &descriptor, &keystore).await?;
 
     let funding_txid = bitcoin::Txid::from_byte_array([44u8; 32]);
     let destination = descriptor.at_derivation_index(5).unwrap().script_pubkey();
     let session = sessions
         .create(NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            wallet.id,
+            &wallet,
             UserId::new(),
             SpendSpec {
                 inputs: vec![OutPointRef {
@@ -443,10 +451,6 @@ async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
                 }],
                 fee_sats: 500,
                 change_output: None,
-            },
-            Policy {
-                threshold: 1,
-                keystores: vec![fingerprint],
             },
             DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),

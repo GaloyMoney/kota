@@ -95,6 +95,11 @@ pub enum JobsError {
     #[error("JobsError - Funding: {0}")]
     Funding(String),
     #[error(
+        "JobsError - WalletNotActive: wallet {0} has no descriptor (not Active); a session \
+         should never exist for an inactive wallet — this indicates an integrity violation"
+    )]
+    WalletNotActive(crate::primitives::WalletId),
+    #[error(
         "JobsError - BlobMissing: content {0} is referenced by the event log but absent from storage"
     )]
     BlobMissing(PsbtHash),

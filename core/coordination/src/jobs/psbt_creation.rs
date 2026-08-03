@@ -56,7 +56,10 @@ pub async fn run_psbt_creation(
         fee_sats: session.fee_sats,
         change_output: session.change_output.clone(),
     };
-    let psbt = build_unsigned_psbt(&spend, wallet.descriptor(), &utxos, network)?;
+    let descriptor = wallet
+        .descriptor()
+        .ok_or(JobsError::WalletNotActive(wallet.id))?;
+    let psbt = build_unsigned_psbt(&spend, descriptor, &utxos, network)?;
 
     let hash = blobs.put(&psbt.serialize()).await;
     let _ = session.record_psbt_created(hash)?;
