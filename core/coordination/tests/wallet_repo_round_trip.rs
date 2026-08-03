@@ -3,7 +3,9 @@
 
 use core_coordination::{
     primitives::*,
-    wallet::{NewWallet, WalletRepo, descriptor_fingerprint, sortedmulti_wsh_descriptor},
+    wallet::{
+        NewWallet, WalletRepo, WalletStatus, descriptor_fingerprint, sortedmulti_wsh_descriptor,
+    },
 };
 
 use bitcoin::Network;
@@ -14,6 +16,7 @@ use miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard};
 use std::str::FromStr;
 
 const NETWORK: Network = Network::Regtest;
+const SEEDS: [u8; 3] = [11, 12, 13];
 
 fn keystore(seed: u8) -> DescriptorPublicKey {
     let secp = Secp256k1::new();
@@ -29,7 +32,7 @@ fn keystore(seed: u8) -> DescriptorPublicKey {
 }
 
 #[tokio::test]
-async fn create_find_and_duplicate_round_trip() -> anyhow::Result<()> {
+async fn keystore_collection_activation_and_duplicate_round_trip() -> anyhow::Result<()> {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL not set, skipping");
         return Ok(());
@@ -46,35 +49,69 @@ async fn create_find_and_duplicate_round_trip() -> anyhow::Result<()> {
     let (clock, _ctrl) = ClockHandle::manual();
     let repo = WalletRepo::new(&pool, clock);
 
-    let descriptor = sortedmulti_wsh_descriptor(2, vec![keystore(11), keystore(12), keystore(13)])?;
+    let descriptor = sortedmulti_wsh_descriptor(2, SEEDS.iter().map(|s| keystore(*s)).collect())?;
     let fingerprint = descriptor_fingerprint(&descriptor, NETWORK);
 
-    // create + find by content address
-    let wallet = repo
-        .create(NewWallet::new(WalletId::new(), &descriptor, NETWORK))
-        .await?;
-    assert_eq!(wallet.descriptor_fingerprint(), fingerprint);
-    assert_eq!(wallet.descriptor(), &descriptor);
-
-    let found = repo.find_by_descriptor_fingerprint(fingerprint).await?;
-    assert_eq!(found.id, wallet.id);
-
-    // re-importing the same wallet (same fingerprint) violates UNIQUE —
-    // the use-case layer turns this into an idempotent find instead
-    let duplicate = repo
-        .create(NewWallet::new(WalletId::new(), &descriptor, NETWORK))
-        .await;
-    assert!(duplicate.is_err());
-
-    // the same descriptor on a different network is a *different* wallet
-    let other_network = repo
+    // create: policy only, no fingerprint yet
+    let participants: Vec<UserId> = (0..3).map(|_| UserId::new()).collect();
+    let mut wallet = repo
         .create(NewWallet::new(
             WalletId::new(),
-            &descriptor,
-            Network::Signet,
-        ))
+            NETWORK,
+            2,
+            participants.clone(),
+        )?)
         .await?;
-    assert_ne!(other_network.descriptor_fingerprint(), fingerprint);
+    assert_eq!(wallet.status(), WalletStatus::CollectingKeystores);
+    assert_eq!(wallet.descriptor_fingerprint(), None);
+
+    // collect keystores one by one; the last one activates the wallet
+    for (seed, participant) in SEEDS.iter().zip(&participants) {
+        let _ = wallet.add_keystore(keystore(*seed), *participant)?;
+        repo.update(&mut wallet).await?;
+    }
+    assert_eq!(wallet.status(), WalletStatus::Active);
+    assert_eq!(wallet.descriptor_fingerprint(), Some(fingerprint));
+    assert_eq!(wallet.descriptor(), Some(&descriptor));
+
+    // find by content address
+    let found = repo
+        .find_by_descriptor_fingerprint(Some(fingerprint))
+        .await?;
+    assert_eq!(found.id, wallet.id);
+    assert_eq!(found.status(), WalletStatus::Active);
+
+    // a second wallet converging on the same descriptor collides on the
+    // UNIQUE fingerprint at activation — the use-case layer turns this
+    // into an idempotent find of the existing wallet
+    let mut duplicate = repo
+        .create(NewWallet::new(
+            WalletId::new(),
+            NETWORK,
+            2,
+            participants.clone(),
+        )?)
+        .await?;
+    for (seed, participant) in SEEDS.iter().zip(&participants) {
+        let _ = duplicate.add_keystore(keystore(*seed), *participant)?;
+    }
+    assert!(repo.update(&mut duplicate).await.is_err());
+
+    // the same policy and keys on a different network is a *different*
+    // wallet: different fingerprint, no collision
+    let mut other_network = repo
+        .create(NewWallet::new(
+            WalletId::new(),
+            Network::Signet,
+            2,
+            participants.clone(),
+        )?)
+        .await?;
+    for (seed, participant) in SEEDS.iter().zip(&participants) {
+        let _ = other_network.add_keystore(keystore(*seed), *participant)?;
+    }
+    repo.update(&mut other_network).await?;
+    assert_ne!(other_network.descriptor_fingerprint(), Some(fingerprint));
 
     Ok(())
 }

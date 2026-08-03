@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT created_at, id FROM core_wallets WHERE (COALESCE((created_at, id) > ($3, $2), $2 IS NULL)) ORDER BY created_at ASC, id ASC LIMIT $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN core_wallet_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM core_wallets WHERE descriptor_fingerprint IS NOT DISTINCT FROM $1) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN core_wallet_events e ON i.id = e.id ORDER BY i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -36,9 +36,7 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Uuid",
-        "Timestamptz",
+        "Text",
         "Bool"
       ]
     },
@@ -51,5 +49,5 @@
       null
     ]
   },
-  "hash": "b6483d37f78ad5368822257b6849f9ae720477c80af664185185b7722ba091ea"
+  "hash": "c869d4a1f5cf77d39a58e7643d4461c02adf5898129b7520e8b116a7d21395ff"
 }

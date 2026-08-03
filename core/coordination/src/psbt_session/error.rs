@@ -6,7 +6,8 @@ use super::primitives::PsbtSessionStatus;
 use super::repo::{
     PsbtSessionCreateError, PsbtSessionFindError, PsbtSessionModifyError, PsbtSessionQueryError,
 };
-use crate::primitives::PsbtSessionId;
+use crate::primitives::{PsbtSessionId, WalletId};
+use crate::wallet::WalletStatus;
 
 #[derive(Error, Debug)]
 pub enum PsbtSessionError {
@@ -20,10 +21,14 @@ pub enum PsbtSessionError {
     Find(#[from] PsbtSessionFindError),
     #[error("PsbtSessionError - Query: {0}")]
     Query(#[from] PsbtSessionQueryError),
-    #[error("PsbtSessionError - InvalidPolicy: threshold {threshold} with {keystores} keystores")]
-    InvalidPolicy { threshold: u32, keystores: usize },
-    #[error("PsbtSessionError - DuplicateKeystore")]
-    DuplicateKeystore,
+    #[error(
+        "PsbtSessionError - WalletNotActive: wallet {wallet_id} is {status}; \
+         only an active wallet can propose spends"
+    )]
+    WalletNotActive {
+        wallet_id: WalletId,
+        status: WalletStatus,
+    },
     #[error("PsbtSessionError - NotCollecting: session {0} is not collecting signatures")]
     NotCollecting(PsbtSessionId),
     #[error("PsbtSessionError - UnknownKeystore: {0} is not part of this wallet's policy")]

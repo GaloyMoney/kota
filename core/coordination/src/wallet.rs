@@ -8,9 +8,11 @@
 //! Plain `sortedmulti` only — no miniscript spending conditions.
 
 mod entity;
+mod primitives;
 pub mod repo;
 
 pub use entity::{NewWallet, Wallet, WalletEvent};
+pub use primitives::WalletStatus;
 pub use repo::WalletRepo;
 
 use bitcoin::bip32::Fingerprint as KeyFingerprint;
@@ -22,7 +24,7 @@ use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 use miniscript::psbt::PsbtExt;
 use miniscript::{ForEachKey, Threshold};
 
-use crate::primitives::DescriptorFingerprint;
+use crate::primitives::{DescriptorFingerprint, UserId};
 use crate::psbt_session::{OutPointRef, SpendSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +49,35 @@ pub enum WalletError {
     },
     #[error("WalletError - Psbt: {0}")]
     Psbt(String),
+    #[error("WalletError - InvalidPolicy: threshold {threshold} of {total_keystores} keystores")]
+    InvalidPolicy {
+        threshold: u32,
+        total_keystores: u32,
+    },
+    #[error(
+        "WalletError - DuplicateParticipant: {0} appears more than once in the participant list"
+    )]
+    DuplicateParticipant(UserId),
+    #[error("WalletError - NotAParticipant: {0} is not a participant of this wallet")]
+    NotAParticipant(UserId),
+    #[error(
+        "WalletError - ParticipantAlreadySubmitted: {0} already submitted a keystore; \
+         remove it before resubmitting a different key"
+    )]
+    ParticipantAlreadySubmitted(UserId),
+    #[error("WalletError - AlreadyActive: wallet is active; the keystore set is immutable")]
+    AlreadyActive,
+    #[error(
+        "WalletError - DuplicateKeystore: master fingerprint {0} already registered with a different key"
+    )]
+    DuplicateKeystore(KeyFingerprint),
+    #[error("WalletError - Cancelled: the wallet was cancelled before activation")]
+    Cancelled,
+    #[error(
+        "WalletError - CannotCancelActive: an active wallet cannot be cancelled; \
+         it must be retired instead"
+    )]
+    CannotCancelActive,
     #[error("WalletError - OutputUpdate: {0}")]
     OutputUpdate(#[from] miniscript::psbt::OutputUpdateError),
     #[error("WalletError - UtxoUpdate: {0}")]
@@ -227,6 +258,20 @@ pub fn build_unsigned_psbt(
     Ok(psbt)
 }
 
+/// Master fingerprint identifying a keystore: the BIP-32 origin
+/// fingerprint when present (Sparrow keystores always carry it),
+/// falling back to the key's own fingerprint.
+pub fn keystore_fingerprint(key: &DescriptorPublicKey) -> KeyFingerprint {
+    match key {
+        DescriptorPublicKey::XPub(xkey) => xkey
+            .origin
+            .as_ref()
+            .map(|(fingerprint, _)| *fingerprint)
+            .unwrap_or_else(|| key.master_fingerprint()),
+        _ => key.master_fingerprint(),
+    }
+}
+
 /// Master fingerprints of the descriptor's keystores, for cross-checking
 /// against a session's `Policy` (Sparrow: the wallet's keystore
 /// fingerprints).
@@ -235,14 +280,7 @@ pub fn descriptor_fingerprints(
 ) -> Vec<KeyFingerprint> {
     let mut fingerprints = Vec::new();
     descriptor.for_each_key(|key| {
-        let fingerprint = match key {
-            DescriptorPublicKey::XPub(xkey) => xkey
-                .origin
-                .as_ref()
-                .map(|(fingerprint, _)| *fingerprint)
-                .unwrap_or_else(|| key.master_fingerprint()),
-            _ => key.master_fingerprint(),
-        };
+        let fingerprint = keystore_fingerprint(key);
         if !fingerprints.contains(&fingerprint) {
             fingerprints.push(fingerprint);
         }
@@ -252,7 +290,7 @@ pub fn descriptor_fingerprints(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
     use bitcoin::secp256k1::Secp256k1;
@@ -261,10 +299,25 @@ mod tests {
 
     const NETWORK: Network = Network::Regtest;
 
-    fn keystore(seed: u8) -> DescriptorPublicKey {
+    pub(crate) fn keystore(seed: u8) -> DescriptorPublicKey {
         let secp = Secp256k1::new();
         let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
         let account_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+        let account_xpriv = xpriv.derive_priv(&secp, &account_path).unwrap();
+        DescriptorPublicKey::XPub(DescriptorXKey {
+            origin: Some((xpriv.fingerprint(&secp), account_path)),
+            xkey: Xpub::from_priv(&secp, &account_xpriv),
+            derivation_path: DerivationPath::from_str("m/0").unwrap(),
+            wildcard: Wildcard::Unhardened,
+        })
+    }
+
+    /// A *different* key (different account path) from the same master
+    /// seed: same master fingerprint as `keystore(seed)`, different xpub.
+    pub(crate) fn different_keystore_same_fingerprint(seed: u8) -> DescriptorPublicKey {
+        let secp = Secp256k1::new();
+        let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
+        let account_path = DerivationPath::from_str("m/48'/0'/1'/2'").unwrap();
         let account_xpriv = xpriv.derive_priv(&secp, &account_path).unwrap();
         DescriptorPublicKey::XPub(DescriptorXKey {
             origin: Some((xpriv.fingerprint(&secp), account_path)),
@@ -334,26 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn new_wallet_records_canonical_descriptor_and_fingerprint() {
-        use es_entity::{IntoEvents, TryFromEvents};
-
-        let descriptor = two_of_three();
-        let new_wallet = NewWallet::new(crate::primitives::WalletId::new(), &descriptor, NETWORK);
-        let expected_fingerprint = descriptor_fingerprint(&descriptor, NETWORK);
-
-        let wallet = Wallet::try_from_events(new_wallet.into_events()).unwrap();
-        assert_eq!(wallet.descriptor(), &descriptor);
-        assert_eq!(wallet.descriptor_fingerprint(), expected_fingerprint);
-    }
-
-    #[test]
     fn descriptor_serializes_as_canonical_string() {
         // miniscript's serde impl uses the Display/FromStr string form —
         // the persisted event JSON is the standard BIP-380 text, not a
         // JSON structure.
         let descriptor = two_of_three();
-        let event = crate::wallet::WalletEvent::Initialized {
-            id: crate::primitives::WalletId::new(),
+        let event = crate::wallet::WalletEvent::Activated {
             descriptor_fingerprint: descriptor_fingerprint(&descriptor, NETWORK),
             descriptor: descriptor.clone(),
         };
@@ -364,9 +403,12 @@ mod tests {
         );
 
         let round_tripped: crate::wallet::WalletEvent = serde_json::from_value(json).unwrap();
-        let crate::wallet::WalletEvent::Initialized {
+        let crate::wallet::WalletEvent::Activated {
             descriptor: parsed, ..
-        } = round_tripped;
+        } = round_tripped
+        else {
+            panic!("expected Activated, got {round_tripped:?}");
+        };
         assert_eq!(parsed, descriptor);
     }
 }

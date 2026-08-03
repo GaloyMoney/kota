@@ -7,6 +7,7 @@ use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
 use chrono::{DateTime, Utc};
 
 use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
+use crate::wallet::{Wallet, WalletStatus, keystore_fingerprint};
 
 use super::error::PsbtSessionError;
 use super::primitives::{
@@ -481,15 +482,6 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
     }
 }
 
-/// Signing policy of the wallet, snapshotted at session creation (Sparrow
-/// vocabulary: N-of-M `threshold` over the wallet's `keystores`). The
-/// snapshot pins the policy even if wallet membership changes later.
-#[derive(Debug, Clone)]
-pub struct Policy {
-    pub threshold: u32,
-    pub keystores: Vec<KeyFingerprint>,
-}
-
 /// What the spend moves: coins consumed, destinations, fee, and change.
 /// The async PSBT-creation job builds the unsigned PSBT from this spec.
 #[derive(Debug, Clone)]
@@ -531,15 +523,36 @@ impl NewPsbtSession {
         NewPsbtSessionBuilder::default()
     }
 
+    /// Propose a spend on `wallet`.
+    ///
+    /// The wallet must be `Active` — a wallet still collecting
+    /// keystores (or a cancelled one) has no descriptor and cannot
+    /// spend. The wallet's signing policy (Sparrow vocabulary: N-of-M
+    /// `threshold` over the wallet's `keystores`, identified by master
+    /// fingerprint) is *snapshotted* into the session at creation, so
+    /// the session pins the exact key set its signatures are validated
+    /// against even if wallet membership were to change later.
     pub fn try_new(
         id: PsbtSessionId,
-        wallet_id: WalletId,
+        wallet: &Wallet,
         proposed_by: UserId,
         spend: SpendSpec,
-        policy: Policy,
         expires_at: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<Self, PsbtSessionError> {
+        if wallet.status() != WalletStatus::Active {
+            return Err(PsbtSessionError::WalletNotActive {
+                wallet_id: wallet.id,
+                status: wallet.status(),
+            });
+        }
+        let wallet_id = wallet.id;
+        let threshold = wallet.threshold;
+        let keystores = wallet
+            .keystores()
+            .iter()
+            .map(keystore_fingerprint)
+            .collect::<Vec<_>>();
         let SpendSpec {
             inputs,
             outputs,
@@ -572,24 +585,10 @@ impl NewPsbtSession {
         if expires_at <= now {
             return Err(PsbtSessionError::ExpiryInPast { expires_at, now });
         }
-        let Policy {
-            threshold,
-            keystores,
-        } = policy;
-        if threshold == 0 || threshold as usize > keystores.len() {
-            return Err(PsbtSessionError::InvalidPolicy {
-                threshold,
-                keystores: keystores.len(),
-            });
-        }
-        {
-            let mut dedup = keystores.clone();
-            dedup.sort();
-            dedup.dedup();
-            if dedup.len() != keystores.len() {
-                return Err(PsbtSessionError::DuplicateKeystore);
-            }
-        }
+        debug_assert!(
+            threshold > 0 && threshold as usize <= keystores.len(),
+            "an active wallet's policy is valid by construction"
+        );
 
         Ok(Self {
             id,
@@ -637,10 +636,38 @@ impl IntoEvents<PsbtSessionEvent> for NewPsbtSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Network;
     use bitcoin::hashes::Hash;
 
+    use crate::wallet::{NewWallet, tests::keystore as wallet_keystore};
+
     fn fp(byte: u8) -> KeyFingerprint {
-        KeyFingerprint::from([byte, byte, byte, byte])
+        keystore_fingerprint(&wallet_keystore(byte))
+    }
+
+    fn wallet_with_keystores(threshold: u32, seeds: &[u8]) -> (Wallet, Vec<UserId>) {
+        let participants: Vec<UserId> = seeds.iter().map(|_| UserId::new()).collect();
+        let mut wallet = Wallet::try_from_events(
+            NewWallet::new(
+                WalletId::new(),
+                Network::Regtest,
+                threshold,
+                participants.clone(),
+            )
+            .unwrap()
+            .into_events(),
+        )
+        .unwrap();
+        for (seed, participant) in seeds.iter().zip(&participants) {
+            let _ = wallet
+                .add_keystore(wallet_keystore(*seed), *participant)
+                .unwrap();
+        }
+        (wallet, participants)
+    }
+
+    fn active_wallet(threshold: u32, seeds: &[u8]) -> Wallet {
+        wallet_with_keystores(threshold, seeds).0
     }
 
     fn dummy_txid(byte: u8) -> Txid {
@@ -683,26 +710,31 @@ mod tests {
         PsbtHash::digest_of(b"unsigned-psbt")
     }
 
-    fn new_session(threshold: u32, signers: Vec<KeyFingerprint>) -> NewPsbtSession {
+    fn propose(
+        wallet: &Wallet,
+        spend: SpendSpec,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<NewPsbtSession, PsbtSessionError> {
         NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            WalletId::new(),
+            wallet,
             UserId::new(),
-            sample_spend(),
-            Policy {
-                threshold,
-                keystores: signers,
-            },
-            expires_at(),
-            now(),
+            spend,
+            expires_at,
+            now,
         )
-        .unwrap()
     }
 
     /// A freshly proposed session: Pending, no PSBT yet.
     fn create_session() -> PsbtSession {
-        let signers = vec![fp(1), fp(2), fp(3)];
-        PsbtSession::try_from_events(new_session(2, signers).into_events()).unwrap()
+        let wallet = active_wallet(2, &[1, 2, 3]);
+        PsbtSession::try_from_events(
+            propose(&wallet, sample_spend(), expires_at(), now())
+                .unwrap()
+                .into_events(),
+        )
+        .unwrap()
     }
 
     /// A session whose PSBT-creation job has run: Collecting.
@@ -1061,122 +1093,89 @@ mod tests {
     }
 
     #[test]
-    fn invalid_policies_rejected() {
-        let signers = vec![fp(1), fp(2)];
-        let policy = |threshold, keystores| Policy {
-            threshold,
-            keystores,
-        };
+    fn proposal_requires_active_wallet() {
+        // still collecting keystores: 3 participants, only 1 submitted
+        let participants: Vec<UserId> = (0..3).map(|_| UserId::new()).collect();
+        let mut wallet = Wallet::try_from_events(
+            NewWallet::new(WalletId::new(), Network::Regtest, 2, participants.clone())
+                .unwrap()
+                .into_events(),
+        )
+        .unwrap();
+        let _ = wallet
+            .add_keystore(wallet_keystore(1), participants[0])
+            .unwrap();
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                sample_spend(),
-                policy(0, signers.clone()),
-                expires_at(),
-                now(),
-            ),
-            Err(PsbtSessionError::InvalidPolicy { .. })
+            propose(&wallet, sample_spend(), expires_at(), now()),
+            Err(PsbtSessionError::WalletNotActive {
+                status: WalletStatus::CollectingKeystores,
+                ..
+            })
         ));
+
+        // cancelled before activation
+        let _ = wallet
+            .cancel(participants[0], "abandoned".to_string())
+            .unwrap();
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                sample_spend(),
-                policy(3, signers),
-                expires_at(),
-                now(),
-            ),
-            Err(PsbtSessionError::InvalidPolicy { .. })
-        ));
-        assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                sample_spend(),
-                policy(1, vec![fp(1), fp(1)]),
-                expires_at(),
-                now(),
-            ),
-            Err(PsbtSessionError::DuplicateKeystore)
+            propose(&wallet, sample_spend(), expires_at(), now()),
+            Err(PsbtSessionError::WalletNotActive {
+                status: WalletStatus::Cancelled,
+                ..
+            })
         ));
     }
 
     #[test]
+    fn proposal_snapshots_wallet_policy() {
+        let wallet = active_wallet(2, &[1, 2, 3]);
+        let session = PsbtSession::try_from_events(
+            propose(&wallet, sample_spend(), expires_at(), now())
+                .unwrap()
+                .into_events(),
+        )
+        .unwrap();
+        assert_eq!(session.wallet_id, wallet.id);
+        assert_eq!(session.threshold(), 2);
+        assert_eq!(session.keystores(), &[fp(1), fp(2), fp(3)]);
+    }
+
+    #[test]
     fn duplicate_inputs_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
         let mut spend = sample_spend();
         let dup = spend.inputs[0].clone();
         spend.inputs.push(dup.clone());
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                spend,
-                Policy {
-                    threshold: 2,
-                    keystores: vec![fp(1), fp(2)],
-                },
-                expires_at(),
-                now(),
-            ),
+            propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::DuplicateInput { txid, vout }) if txid == dup.txid && vout == dup.vout
         ));
     }
 
     #[test]
     fn fee_above_cap_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
         let mut spend = sample_spend();
         spend.fee_sats = MAX_FEE_SATS + 1;
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                spend,
-                Policy {
-                    threshold: 2,
-                    keystores: vec![fp(1), fp(2)],
-                },
-                expires_at(),
-                now(),
-            ),
+            propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::FeeExceedsMax { .. })
         ));
     }
 
     #[test]
     fn expiry_in_past_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
         // equal to now
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                sample_spend(),
-                Policy {
-                    threshold: 2,
-                    keystores: vec![fp(1), fp(2)],
-                },
-                now(),
-                now(),
-            ),
+            propose(&wallet, sample_spend(), now(), now()),
             Err(PsbtSessionError::ExpiryInPast { .. })
         ));
         // before now
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
+            propose(
+                &wallet,
                 sample_spend(),
-                Policy {
-                    threshold: 2,
-                    keystores: vec![fp(1), fp(2)],
-                },
                 now() - chrono::Duration::seconds(1),
                 now(),
             ),
@@ -1186,39 +1185,19 @@ mod tests {
 
     #[test]
     fn empty_spend_rejected() {
-        let signers = vec![fp(1), fp(2)];
-        let policy = Policy {
-            threshold: 2,
-            keystores: signers,
-        };
+        let wallet = active_wallet(2, &[1, 2]);
 
         let mut spend = sample_spend();
         spend.inputs = vec![];
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                spend,
-                policy.clone(),
-                expires_at(),
-                now(),
-            ),
+            propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::EmptyInputs)
         ));
 
         let mut spend = sample_spend();
         spend.outputs = vec![];
         assert!(matches!(
-            NewPsbtSession::try_new(
-                PsbtSessionId::new(),
-                WalletId::new(),
-                UserId::new(),
-                spend,
-                policy,
-                expires_at(),
-                now(),
-            ),
+            propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::EmptyOutputs)
         ));
     }

@@ -17,7 +17,10 @@ CREATE TABLE core_psbt_session_events (
 
 CREATE TABLE core_wallets (
   id UUID PRIMARY KEY,
-  descriptor_fingerprint VARCHAR NOT NULL UNIQUE,
+  status VARCHAR NOT NULL,
+  -- NULL while the wallet is collecting keystores; set (and UNIQUE)
+  -- from Activated on. Postgres UNIQUE allows any number of NULLs.
+  descriptor_fingerprint VARCHAR UNIQUE,
   created_at TIMESTAMPTZ NOT NULL
 );
 
