@@ -13,7 +13,7 @@
 //! this trait; [`InMemoryBlobStore`] serves tests.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::primitives::PsbtHash;
 
@@ -28,8 +28,10 @@ pub trait BlobStore {
     fn delete<'a>(&'a self, hash: &'a PsbtHash) -> impl Future<Output = bool> + Send + 'a;
 }
 
-#[derive(Default)]
-pub struct InMemoryBlobStore(Mutex<HashMap<PsbtHash, Vec<u8>>>);
+/// In-memory store for tests. Clones share the same underlying map, so
+/// a cloned service handle sees the same blobs.
+#[derive(Default, Clone)]
+pub struct InMemoryBlobStore(Arc<Mutex<HashMap<PsbtHash, Vec<u8>>>>);
 
 impl BlobStore for InMemoryBlobStore {
     async fn put(&self, bytes: &[u8]) -> PsbtHash {

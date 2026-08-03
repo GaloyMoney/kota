@@ -84,6 +84,29 @@ event-sourced PSBT signing-session lifecycle.
   fills `witness_utxo`/`witness_script`/`bip32_derivation` via
   `rust-miniscript`), `descriptor_fingerprints` cross-checks a descriptor
   against a session's policy.
+- **`jobs` module** — the async job units that drive the session
+  lifecycle, each one idempotent load-aggregate/do-work/persist
+  function with a thin `job`-crate scheduling adapter (lana
+  conventions): `run_psbt_creation` builds the unsigned PSBT
+  platform-side from the recorded `SpendSpec` + wallet descriptor +
+  chain data (never accepted from the proposer; chain data enters via
+  the `FundingUtxoProvider` trait), `run_finalization` recomputes the
+  final tx from the original unsigned PSBT plus the platform-built
+  merged signature blobs (signer-submitted documents are never loaded
+  back), `apply_chain_observation` folds chain-sync observations into
+  the lifecycle. `jobs::register` wires the initializers into a
+  `job::Jobs` executor.
+- **`app` module** — the use-case layer (`Coordination` service, lana
+  pattern): commands that drive the aggregates and spawn the jobs
+  (`propose_spend` → PSBT creation, every signature upload →
+  finalization, so the quorum never waits on a poll tick). This is
+  where the bindings the aggregates deliberately defer get enforced:
+  the signer ↔ keystore binding for signature submission (the
+  attributed fingerprint is resolved from the wallet's recorded
+  submissions, never from client input) and idempotent wallet import
+  (a UNIQUE fingerprint collision at activation resolves to a find of
+  the existing wallet). `init` takes `&mut job::Jobs` and registers
+  the initializers, mirroring lana's module init convention.
 - **`storage` module** — the `BlobStore` content-addressed storage trait
   (`put`/`get`/`delete` by hash) with an `InMemoryBlobStore` for tests;
   GCS/local-filesystem backends to come.
@@ -103,17 +126,25 @@ event-sourced PSBT signing-session lifecycle.
 
 ### Tests
 
-- 46 entity unit tests covering the wallet and session state machines,
+- 48 entity unit tests covering the wallet and session state machines,
   idempotency guards, participant binding, keystore replacement, and
   reorg handling — no DB needed.
-- 3 end-to-end cryptographic tests (`core/coordination/tests/e2e_signing.rs`)
+- End-to-end cryptographic tests (`core/coordination/tests/e2e_signing.rs`)
   running the full flow with real keys: propose -> build unsigned PSBT
   from the spec -> store/fetch by content hash -> sign with a real
   `Xpriv` -> additive-only validation -> finalize -> ECDSA verification
   of the witness against the funding script. Plus negative cases:
   tampered unsigned tx and stripped cosigner signatures are rejected.
-- 1 repo round-trip integration test (`core/coordination/tests/`), skipped
-  unless `DATABASE_URL` points at a migrated database.
+- Use-case integration tests (`core/coordination/tests/app_flow.rs`):
+  the full flow through `Coordination` commands with the real `job`
+  executor running (spawn -> poll -> execute) — each test gets its own
+  database, so they parallelize safely.
+- Job and repo integration tests (`core/coordination/tests/jobs.rs`,
+  `*_round_trip.rs`). All DB-backed tests are skipped unless
+  `DATABASE_URL` points at a postgres server.
+- `bats bats/e2e.bats` — end-to-end smoke test: boots a dedicated
+  postgres (own port/data dir), runs migrations, then runs fmt,
+  clippy, and the full test suite against it.
 
 ## Development
 
@@ -124,7 +155,9 @@ with the Rust toolchain (from `rust-toolchain.toml`), `sqlx-cli`,
 
 ```sh
 ./dev/bin/pg-start.sh           # local postgres on :5441 + migrations (stop: pg-stop.sh)
+                                # PGPORT/PGDATABASE/PGDATA overridable for parallel clones
 SQLX_OFFLINE=true cargo test    # all tests, incl. repo round-trip against local pg
+bats bats/e2e.bats              # full e2e smoke: dedicated pg, migrations, fmt+clippy+tests
 
 cargo sqlx prepare --workspace  # regenerate .sqlx offline cache (needs running pg)
 ```

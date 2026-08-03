@@ -47,6 +47,7 @@ pub use psbt_creation::{
 /// The use-case layer spawns `psbt_creation` when a session is proposed
 /// and `finalization` at every signature upload (it no-ops below
 /// threshold), so the quorum never waits on a polling tick.
+#[derive(Clone)]
 pub struct CoordinationJobSpawners {
     pub psbt_creation: job::JobSpawner<PsbtCreationJobConfig>,
     pub finalization: job::JobSpawner<FinalizationJobConfig>,
