@@ -605,6 +605,21 @@ impl NewPsbtSession {
         if outputs.is_empty() {
             return Err(PsbtSessionError::EmptyOutputs);
         }
+        // The wallet's network is known at proposal time, so a
+        // wrong-network destination is rejected here — not left for the
+        // PSBT-creation job to discover after the fact, where it would
+        // fail permanently on a session that can no longer be fixed.
+        // (`build_unsigned_psbt` re-checks as defense-in-depth.)
+        for output in &outputs {
+            output
+                .address
+                .clone()
+                .require_network(wallet.network)
+                .map_err(|e| PsbtSessionError::InvalidAddress {
+                    network: wallet.network,
+                    reason: e.to_string(),
+                })?;
+        }
         if fee_sats > MAX_FEE_SATS {
             return Err(PsbtSessionError::FeeExceedsMax {
                 fee_sats,
@@ -722,7 +737,10 @@ mod tests {
                 vout: 0,
             }],
             outputs: vec![SpendOutput {
-                address: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+                // regtest HRP of the BIP-173 example witness program —
+                // proposal validates output addresses against the wallet's
+                // network, and the fixture wallet is on regtest
+                address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
                     .parse()
                     .unwrap(),
                 amount_sats: 50_000,
@@ -1261,6 +1279,21 @@ mod tests {
                 now(),
             ),
             Err(PsbtSessionError::ExpiryInPast { .. })
+        ));
+    }
+
+    #[test]
+    fn wrong_network_output_address_rejected_at_proposal() {
+        // a mainnet destination on a regtest wallet: rejected at proposal,
+        // not discovered by the PSBT-creation job after the session exists
+        let wallet = active_wallet(2, &[1, 2]);
+        let mut spend = sample_spend();
+        spend.outputs[0].address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            propose(&wallet, spend, expires_at(), now()),
+            Err(PsbtSessionError::InvalidAddress { .. })
         ));
     }
 

@@ -52,6 +52,13 @@ pub enum PsbtSessionError {
         expires_at: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
     },
+    #[error(
+        "PsbtSessionError - InvalidAddress: output address is not valid for {network}: {reason}"
+    )]
+    InvalidAddress {
+        network: bitcoin::Network,
+        reason: String,
+    },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,
