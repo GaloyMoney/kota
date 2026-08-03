@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
+use bitcoin::{
+    Amount, BlockHash, ScriptBuf, Txid, WScriptHash, bip32::Fingerprint as KeyFingerprint,
+};
 
 use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 use crate::wallet::{Wallet, WalletStatus, keystore_fingerprint};
@@ -41,9 +43,7 @@ pub enum PsbtSessionEvent {
     /// The async PSBT-creation job built the unsigned PSBT from the
     /// `Initialized` data and uploaded it to content-addressed storage.
     /// Transitions the session from Pending to Collecting.
-    PsbtCreated {
-        unsigned_psbt_hash: PsbtHash,
-    },
+    PsbtCreated { unsigned_psbt_hash: PsbtHash },
     /// A signer submitted a signed PSBT that passed additive-only
     /// validation (see `crate::psbt`). Collected ≠ used: more signatures
     /// than the threshold may be collected.
@@ -60,9 +60,7 @@ pub enum PsbtSessionEvent {
         sigs_used: Vec<KeyFingerprint>,
     },
     /// Chain sync observed the finalized tx in the mempool / a block.
-    BroadcastSeen {
-        txid: Txid,
-    },
+    BroadcastSeen { txid: Txid },
     Confirmed {
         txid: Txid,
         height: u64,
@@ -70,10 +68,13 @@ pub enum PsbtSessionEvent {
     },
     /// Chain-observed reversal — reorg, external spend of inputs, RBF
     /// replacement. Chain states are never terminal.
-    Invalidated {
-        reason: InvalidationReason,
-    },
+    Invalidated { reason: InvalidationReason },
     Cancelled {
+        /// User who cancelled the proposal (platform-attributed — like
+        /// `proposed_by`, no cryptographic evidence exists). The audit
+        /// trail answers "who abandoned this spend?" the same way it
+        /// answers "who proposed it?".
+        cancelled_by: UserId,
         reason: String,
     },
 }
@@ -358,7 +359,11 @@ impl PsbtSession {
     /// out, the chain decides. `Finalized` is still cancellable ("do not
     /// broadcast, abandon"), as is a `Pending` session whose PSBT
     /// creation is stuck.
-    pub fn cancel(&mut self, reason: String) -> Result<Idempotent<()>, PsbtSessionError> {
+    pub fn cancel(
+        &mut self,
+        cancelled_by: UserId,
+        reason: String,
+    ) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: PsbtSessionEvent::Cancelled { .. },
@@ -375,8 +380,86 @@ impl PsbtSession {
             }
         }
 
-        self.events.push(PsbtSessionEvent::Cancelled { reason });
+        self.events.push(PsbtSessionEvent::Cancelled {
+            cancelled_by,
+            reason,
+        });
         Ok(Idempotent::Executed(()))
+    }
+
+    /// Re-assert the construction invariants on a hydrated entity.
+    ///
+    /// Every mutating method validates before pushing events, so a
+    /// well-formed stream always satisfies these — but hydration reads
+    /// *persisted* bytes, and a corrupted or hand-edited stream would
+    /// otherwise produce an entity whose methods misbehave silently
+    /// (a threshold above the keystore count can never be met; a
+    /// signature from outside the policy would count toward it).
+    /// Fail loudly at load instead. `EventDeserialization` is the
+    /// closest honest error: the persisted representation is invalid.
+    fn verify_hydrated_invariants(&self) -> Result<(), EntityHydrationError> {
+        use serde::de::Error as _;
+        fn violation(msg: String) -> EntityHydrationError {
+            EntityHydrationError::EventDeserialization(serde_json::Error::custom(format!(
+                "psbt session invariant violated: {msg}"
+            )))
+        }
+
+        if self.threshold == 0 || self.threshold as usize > self.keystores.len() {
+            return Err(violation(format!(
+                "policy {}-of-{} is out of range",
+                self.threshold,
+                self.keystores.len()
+            )));
+        }
+        {
+            let mut dedup = self.keystores.clone();
+            dedup.sort();
+            dedup.dedup();
+            if dedup.len() != self.keystores.len() {
+                return Err(violation("duplicate keystore in policy".to_string()));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for sig in &self.signatures {
+            if !self.keystores.contains(&sig.fingerprint) {
+                return Err(violation(format!(
+                    "recorded signature from {} is not part of the policy",
+                    sig.fingerprint
+                )));
+            }
+            if !seen.insert(sig.fingerprint) {
+                return Err(violation(format!(
+                    "duplicate recorded signature from {}",
+                    sig.fingerprint
+                )));
+            }
+        }
+        if let Some(finalization) = &self.finalization {
+            if finalization.sigs_used.len() < self.threshold as usize {
+                return Err(violation(format!(
+                    "finalized below threshold ({} of {})",
+                    finalization.sigs_used.len(),
+                    self.threshold
+                )));
+            }
+            let mut dedup = finalization.sigs_used.clone();
+            dedup.sort();
+            dedup.dedup();
+            if dedup.len() != finalization.sigs_used.len() {
+                return Err(violation("duplicate keystore in sigs_used".to_string()));
+            }
+            if !finalization
+                .sigs_used
+                .iter()
+                .all(|fp| self.signatures.iter().any(|s| s.fingerprint == *fp))
+            {
+                return Err(violation(
+                    "sigs_used is not a subset of collected signatures".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -439,7 +522,9 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                 | PsbtSessionEvent::Cancelled { .. } => {}
             }
         }
-        builder.signatures(signatures).events(events).build()
+        let entity = builder.signatures(signatures).events(events).build()?;
+        entity.verify_hydrated_invariants()?;
+        Ok(entity)
     }
 }
 
@@ -463,6 +548,30 @@ pub struct SpendSpec {
 /// job additionally enforces exact balance (inputs == outputs + fee),
 /// and signers see the implied feerate on-device.
 pub const MAX_FEE_SATS: u64 = 1_000_000;
+
+/// Hard caps on the size of a spend spec, in inputs/outputs.
+///
+/// The spec is recorded verbatim in the `Initialized` event and drives
+/// the creation job's work; a malicious or broken proposer submitting
+/// thousands of outpoints would bloat the event log and the job queue.
+/// `MAX_PSBT_BYTES` caps the *stored* PSBT documents — these caps bound
+/// the proposal itself. 100 inputs of a 15-of-15 P2WSH multisig is
+/// ~40k vB, still comfortably within the 100k-vB standardness limit.
+pub const MAX_SPEND_INPUTS: usize = 100;
+
+/// See [`MAX_SPEND_INPUTS`]. The change output (at most one) rides on
+/// top of this cap.
+pub const MAX_SPEND_OUTPUTS: usize = 100;
+
+/// Dust threshold for the wallet's change outputs. Change is always
+/// P2WSH (derived from the `wsh(sortedmulti)` descriptor by the
+/// creation job), so the bound is computable at proposal time from a
+/// representative script — dust depends only on the script's
+/// serialized size, not its content.
+fn p2wsh_dust_threshold() -> Amount {
+    use bitcoin::hashes::Hash;
+    ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array([0; 32])).minimal_non_dust()
+}
 
 #[derive(Debug, Builder)]
 pub struct NewPsbtSession {
@@ -520,6 +629,12 @@ impl NewPsbtSession {
         if inputs.is_empty() {
             return Err(PsbtSessionError::EmptyInputs);
         }
+        if inputs.len() > MAX_SPEND_INPUTS {
+            return Err(PsbtSessionError::TooManyInputs {
+                count: inputs.len(),
+                max: MAX_SPEND_INPUTS,
+            });
+        }
         {
             let mut dedup = inputs.clone();
             dedup.sort();
@@ -533,6 +648,52 @@ impl NewPsbtSession {
         }
         if outputs.is_empty() {
             return Err(PsbtSessionError::EmptyOutputs);
+        }
+        if outputs.len() > MAX_SPEND_OUTPUTS {
+            return Err(PsbtSessionError::TooManyOutputs {
+                count: outputs.len(),
+                max: MAX_SPEND_OUTPUTS,
+            });
+        }
+        // The wallet's network is known at proposal time, so a
+        // wrong-network destination is rejected here — not left for the
+        // PSBT-creation job to discover after the fact, where it would
+        // fail permanently on a session that can no longer be fixed.
+        // (`build_unsigned_psbt` re-checks as defense-in-depth.)
+        for output in &outputs {
+            let address = output
+                .address
+                .clone()
+                .require_network(wallet.network)
+                .map_err(|e| PsbtSessionError::InvalidAddress {
+                    network: wallet.network,
+                    reason: e.to_string(),
+                })?;
+            // A zero or sub-dust output makes the whole transaction
+            // non-standard: it would build and finalize fine and then
+            // never relay, stranding the session past finalization.
+            // The dust threshold is script-dependent and knowable at
+            // proposal time.
+            let dust = address.script_pubkey().minimal_non_dust();
+            if Amount::from_sat(output.amount_sats) < dust {
+                return Err(PsbtSessionError::DustOutput {
+                    amount_sats: output.amount_sats,
+                    dust_sats: dust.to_sat(),
+                });
+            }
+        }
+        // Change is always P2WSH (derived from the wsh(sortedmulti)
+        // descriptor by the creation job), so its dust bound is known
+        // here too — sub-dust change must be folded into the fee by the
+        // proposer, not emitted as an unspendable output.
+        if let Some(change) = &change_output {
+            let dust = p2wsh_dust_threshold();
+            if Amount::from_sat(change.amount_sats) < dust {
+                return Err(PsbtSessionError::DustOutput {
+                    amount_sats: change.amount_sats,
+                    dust_sats: dust.to_sat(),
+                });
+            }
         }
         if fee_sats > MAX_FEE_SATS {
             return Err(PsbtSessionError::FeeExceedsMax {
@@ -638,7 +799,10 @@ mod tests {
                 vout: 0,
             }],
             outputs: vec![SpendOutput {
-                address: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+                // regtest HRP of the BIP-173 example witness program —
+                // proposal validates output addresses against the wallet's
+                // network, and the fixture wallet is on regtest
+                address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
                     .parse()
                     .unwrap(),
                 amount_sats: 50_000,
@@ -737,7 +901,9 @@ mod tests {
     #[test]
     fn cannot_attach_psbt_after_cancel() {
         let mut session = create_session();
-        let _ = session.cancel("gave up".to_string()).unwrap();
+        let _ = session
+            .cancel(UserId::new(), "gave up".to_string())
+            .unwrap();
         assert!(matches!(
             session.record_psbt_created(unsigned_psbt_hash()),
             Err(PsbtSessionError::CannotAttachPsbt { .. })
@@ -845,7 +1011,9 @@ mod tests {
         ));
 
         let mut session = create_collecting_session();
-        let _ = session.cancel("changed mind".to_string()).unwrap();
+        let _ = session
+            .cancel(UserId::new(), "changed mind".to_string())
+            .unwrap();
         assert!(matches!(
             add_sig(&mut session, 1),
             Err(PsbtSessionError::NotCollecting(_))
@@ -956,14 +1124,14 @@ mod tests {
         // pending (stuck PSBT creation) can be cancelled
         assert!(
             session
-                .cancel("no longer needed".to_string())
+                .cancel(UserId::new(), "no longer needed".to_string())
                 .unwrap()
                 .did_execute()
         );
         assert_eq!(session.status(), PsbtSessionStatus::Cancelled);
         assert!(
             session
-                .cancel("again".to_string())
+                .cancel(UserId::new(), "again".to_string())
                 .unwrap()
                 .was_already_applied()
         );
@@ -973,7 +1141,12 @@ mod tests {
         let _ = add_sig(&mut session, 1).unwrap();
         let _ = add_sig(&mut session, 2).unwrap();
         finalize(&mut session, vec![fp(1), fp(2)]);
-        assert!(session.cancel("abandon".to_string()).unwrap().did_execute());
+        assert!(
+            session
+                .cancel(UserId::new(), "abandon".to_string())
+                .unwrap()
+                .did_execute()
+        );
 
         // once broadcast, the chain decides
         let mut session = create_collecting_session();
@@ -982,7 +1155,7 @@ mod tests {
         finalize(&mut session, vec![fp(1), fp(2)]);
         let _ = session.mark_broadcast_seen(dummy_txid(1)).unwrap();
         assert!(matches!(
-            session.cancel("too late".to_string()),
+            session.cancel(UserId::new(), "too late".to_string()),
             Err(PsbtSessionError::CannotCancel { .. })
         ));
     }
@@ -1052,6 +1225,132 @@ mod tests {
         assert!(matches!(
             propose(&wallet, spend),
             Err(PsbtSessionError::FeeExceedsMax { .. })
+        ));
+    }
+
+    #[test]
+    fn wrong_network_output_address_rejected_at_proposal() {
+        // a mainnet destination on a regtest wallet: rejected at proposal,
+        // not discovered by the PSBT-creation job after the session exists
+        let wallet = active_wallet(2, &[1, 2]);
+        let mut spend = sample_spend();
+        spend.outputs[0].address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            propose(&wallet, spend),
+            Err(PsbtSessionError::InvalidAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn hydration_rejects_out_of_range_policy() {
+        // a stream that could never have been produced via try_new:
+        // threshold above the snapshotted keystore set
+        let wallet = active_wallet(2, &[1, 2, 3]);
+        let spend = sample_spend();
+        let events = EntityEvents::init(
+            PsbtSessionId::new(),
+            [PsbtSessionEvent::Initialized {
+                id: PsbtSessionId::new(),
+                wallet_id: wallet.id,
+                proposed_by: UserId::new(),
+                inputs: spend.inputs,
+                outputs: spend.outputs,
+                fee_sats: spend.fee_sats,
+                change_output: spend.change_output,
+                threshold: 5,
+                keystores: vec![fp(1), fp(2), fp(3)],
+            }],
+        );
+        assert!(PsbtSession::try_from_events(events).is_err());
+    }
+
+    #[test]
+    fn hydration_rejects_signature_from_unknown_keystore() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        // an event the entity would never have accepted (fp(42) is not
+        // in the policy), injected straight into the persisted stream
+        session.events.push(PsbtSessionEvent::SignatureAdded {
+            fingerprint: fp(42),
+            signed_psbt_hash: PsbtHash::digest_of(b"bogus"),
+        });
+        assert!(PsbtSession::try_from_events(session.events.clone()).is_err());
+    }
+
+    #[test]
+    fn hydration_rejects_finalized_with_uncollected_sigs() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        session.events.push(PsbtSessionEvent::Finalized {
+            txid: dummy_txid(1),
+            final_tx_hash: PsbtHash::digest_of(b"final-tx"),
+            sigs_used: vec![fp(1), fp(2)],
+        });
+        assert!(PsbtSession::try_from_events(session.events.clone()).is_err());
+    }
+
+    #[test]
+    fn hydration_accepts_well_formed_stream() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        let _ = add_sig(&mut session, 2).unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
+        let hydrated = PsbtSession::try_from_events(session.events.clone()).unwrap();
+        assert_eq!(hydrated.status(), PsbtSessionStatus::Finalized);
+        assert_eq!(hydrated.signature_count(), 2);
+    }
+
+    #[test]
+    fn spend_size_caps_enforced() {
+        let wallet = active_wallet(2, &[1, 2]);
+
+        let mut spend = sample_spend();
+        spend.inputs = (0..MAX_SPEND_INPUTS + 1)
+            .map(|i| OutPointRef {
+                txid: dummy_txid(i as u8),
+                vout: 0,
+            })
+            .collect();
+        assert!(matches!(
+            propose(&wallet, spend),
+            Err(PsbtSessionError::TooManyInputs { .. })
+        ));
+
+        let mut spend = sample_spend();
+        spend.outputs = (0..MAX_SPEND_OUTPUTS + 1)
+            .map(|_| sample_spend().outputs[0].clone())
+            .collect();
+        assert!(matches!(
+            propose(&wallet, spend),
+            Err(PsbtSessionError::TooManyOutputs { .. })
+        ));
+    }
+
+    #[test]
+    fn dust_outputs_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
+
+        // zero- and sub-dust spend outputs
+        for amount_sats in [0, 100] {
+            let mut spend = sample_spend();
+            spend.outputs[0].amount_sats = amount_sats;
+            assert!(matches!(
+                propose(&wallet, spend),
+                Err(PsbtSessionError::DustOutput { .. })
+            ));
+        }
+
+        // sub-dust change should have been folded into the fee
+        let mut spend = sample_spend();
+        spend.change_output = Some(ChangeOutput {
+            amount_sats: 100,
+            derivation_index: 1,
+        });
+        assert!(matches!(
+            propose(&wallet, spend),
+            Err(PsbtSessionError::DustOutput { .. })
         ));
     }
 

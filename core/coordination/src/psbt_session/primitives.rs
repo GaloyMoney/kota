@@ -70,8 +70,8 @@ pub struct OutPointRef {
 #[serde(rename_all = "camelCase")]
 pub struct SpendOutput {
     /// Destination address. Syntactic validity is enforced by the type
-    /// (parse at the boundary); network validation happens at the
-    /// wallet layer, where the instance's network is known.
+    /// (parse at the boundary); network validity is checked at proposal
+    /// time against the wallet's network (`NewPsbtSession::try_new`).
     pub address: BitcoinAddress,
     pub amount_sats: u64,
 }
