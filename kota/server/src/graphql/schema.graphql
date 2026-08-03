@@ -1,0 +1,258 @@
+scalar Base64
+
+type ChangeOutput {
+	amountSats: Int!
+	"""
+	Derivation index on the wallet descriptor the platform derives
+	the change address from — never client-supplied.
+	"""
+	derivationIndex: Int!
+}
+
+input ChangeOutputInput {
+	amountSats: Int!
+	derivationIndex: Int!
+}
+
+"""
+A collected signature: the signer's master fingerprint and the
+content address of the platform-built merged PSBT blob.
+"""
+type CollectedSignature {
+	fingerprint: String!
+	signedPsbtHash: String!
+}
+
+"""
+Once finalized: the txid, the content address of the final
+transaction blob, and exactly which signatures were used.
+"""
+type Finalization {
+	finalTxHash: String!
+	sigsUsed: [String!]!
+	txid: String!
+}
+
+type KeystoreSubmission {
+	"""
+	Master fingerprint of the submitted keystore — the identity
+	signatures are attributed to.
+	"""
+	fingerprint: String!
+	keystore: String!
+	userId: UserId!
+}
+
+type Mutation {
+	"""
+	Submit the acting user's signed PSBT. The signer is bound from
+	the wallet's recorded keystore submissions, never from client
+	input.
+	"""
+	signedPsbtSubmit(input: SignedPsbtSubmitInput!): SignedPsbtSubmitPayload!
+	"""
+	Propose a spend on an active wallet. The session starts
+	`Pending`; the PSBT-creation job transitions it to
+	`Collecting` asynchronously.
+	"""
+	spendPropose(input: SpendProposeInput!): SpendProposePayload!
+	"""
+	Abandon a wallet that is stuck collecting keystores.
+	"""
+	walletCancel(input: WalletCancelInput!): WalletCancelPayload!
+	"""
+	Withdraw a participant's keystore pre-activation so they can
+	submit a replacement.
+	"""
+	walletKeystoreRemove(input: WalletKeystoreRemoveInput!): WalletKeystoreRemovePayload!
+	"""
+	Submit the acting user's keystore. Activates the wallet when
+	the quorum completes; colliding with an existing wallet's
+	descriptor fingerprint resolves to that wallet (idempotent
+	import).
+	"""
+	walletKeystoreSubmit(input: WalletKeystoreSubmitInput!): WalletKeystoreSubmitPayload!
+	"""
+	Register a wallet policy: an N-of-M multisig expecting one
+	keystore from each participant.
+	"""
+	walletRegister(input: WalletRegisterInput!): WalletRegisterPayload!
+}
+
+type PsbtSession {
+	changeOutput: ChangeOutput
+	feeSats: Int!
+	finalization: Finalization
+	inputs: [SpendOutPoint!]!
+	"""
+	Master fingerprints that have not yet signed.
+	"""
+	missingKeystores: [String!]!
+	outputs: [SpendOutput!]!
+	proposedBy: UserId!
+	psbtSessionId: PsbtSessionId!
+	signatureCount: Int!
+	signatures: [CollectedSignature!]!
+	status: PsbtSessionStatus!
+	threshold: Int!
+	thresholdMet: Boolean!
+	"""
+	The unsigned PSBT bytes (base64) a signer downloads to their
+	device. `null` until the creation job has run.
+	"""
+	unsignedPsbt: Base64
+	"""
+	Content address of the unsigned PSBT blob, once the creation
+	job has run (`Collecting` onwards).
+	"""
+	unsignedPsbtHash: String
+	walletId: WalletId!
+}
+
+scalar PsbtSessionId
+
+enum PsbtSessionStatus {
+	BROADCAST
+	CANCELLED
+	COLLECTING
+	CONFIRMED
+	FINALIZED
+	INVALIDATED
+	PENDING
+}
+
+type Query {
+	psbtSession(id: PsbtSessionId!): PsbtSession
+	wallet(id: WalletId!): Wallet
+	"""
+	Idempotent wallet import: look up a wallet by its content
+	address (network + canonical descriptor).
+	"""
+	walletByDescriptorFingerprint(fingerprint: String!): Wallet
+}
+
+input SignedPsbtSubmitInput {
+	sessionId: PsbtSessionId!
+	"""
+	The signed PSBT, base64-encoded. Only the signatures are
+	extracted and stored — never the submitted blob itself.
+	"""
+	signedPsbt: Base64!
+}
+
+type SignedPsbtSubmitPayload {
+	psbtSession: PsbtSession!
+}
+
+type SpendOutPoint {
+	txid: String!
+	vout: Int!
+}
+
+input SpendOutPointInput {
+	txid: String!
+	vout: Int!
+}
+
+type SpendOutput {
+	address: String!
+	amountSats: Int!
+}
+
+input SpendOutputInput {
+	address: String!
+	amountSats: Int!
+}
+
+input SpendProposeInput {
+	changeOutput: ChangeOutputInput
+	feeSats: Int!
+	inputs: [SpendOutPointInput!]!
+	outputs: [SpendOutputInput!]!
+	walletId: WalletId!
+}
+
+type SpendProposePayload {
+	psbtSession: PsbtSession!
+}
+
+scalar UserId
+
+type Wallet {
+	"""
+	The canonical descriptor, once the wallet is `Active`.
+	"""
+	descriptor: String
+	"""
+	Content address of (network, canonical descriptor) — the
+	idempotent-import key. Present once `Active`.
+	"""
+	descriptorFingerprint: String
+	keystores: [KeystoreSubmission!]!
+	network: String!
+	participants: [UserId!]!
+	pendingParticipants: [UserId!]!
+	status: WalletStatus!
+	threshold: Int!
+	walletId: WalletId!
+}
+
+input WalletCancelInput {
+	reason: String!
+	walletId: WalletId!
+}
+
+type WalletCancelPayload {
+	wallet: Wallet!
+}
+
+scalar WalletId
+
+input WalletKeystoreRemoveInput {
+	participant: UserId!
+	walletId: WalletId!
+}
+
+type WalletKeystoreRemovePayload {
+	wallet: Wallet!
+}
+
+input WalletKeystoreSubmitInput {
+	"""
+	Descriptor public key (`[fingerprint/path]xpub…/0/*`).
+	"""
+	keystore: String!
+	walletId: WalletId!
+}
+
+type WalletKeystoreSubmitPayload {
+	wallet: Wallet!
+}
+
+input WalletRegisterInput {
+	participants: [UserId!]!
+	threshold: Int!
+}
+
+type WalletRegisterPayload {
+	wallet: Wallet!
+}
+
+enum WalletStatus {
+	ACTIVE
+	CANCELLED
+	COLLECTING_KEYSTORES
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+	mutation: Mutation
+}

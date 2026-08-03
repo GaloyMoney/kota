@@ -10,6 +10,10 @@ workspace = true
 name = "kota-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "write_sdl"
+path = "src/bin/write_sdl.rs"
+
 [dependencies]
 kota-app = { path = "../app" }
 kota-server = { path = "../server" }

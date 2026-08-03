@@ -44,7 +44,7 @@ where
     S: Future<Output = ()> + Send + 'static,
 {
     let port = config.port;
-    let schema = graphql::schema(app);
+    let schema = graphql::schema(Some(app));
 
     let app = Router::new()
         .route("/health", get(health_check))

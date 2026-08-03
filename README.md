@@ -42,6 +42,15 @@ resolves the subject from a JWT). The blob store is type-erased
 (`DynBlobStore`) so the schema has a concrete app type while the binary
 picks the backend.
 
+The schema's SDL is checked in at
+`kota/server/src/graphql/schema.graphql` and kept honest by a unit
+test that regenerates it and compares. Regenerate after schema
+changes (lana's `write_sdl` codegen binary, no database needed):
+
+```sh
+cargo run -p kota-cli --bin write_sdl > kota/server/src/graphql/schema.graphql
+```
+
 ## `kota/cli` — the binary
 
 `kota-cli run` migrates the database, wires the app layer, starts the
