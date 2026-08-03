@@ -5,7 +5,7 @@ set -euo pipefail
 
 PGDATA="${PGDATA:-$(pwd)/.nix-deps/pg}"
 PGPORT="${PGPORT:-5441}"
-PGDATABASE="${PGDATABASE:-multisig}"
+PGDATABASE="${PGDATABASE:-kota}"
 export DATABASE_URL="${DATABASE_URL:-postgres://user:password@127.0.0.1:${PGPORT}/${PGDATABASE}}"
 
 if [ ! -d "${PGDATA}/data" ]; then

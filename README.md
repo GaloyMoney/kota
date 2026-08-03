@@ -39,14 +39,13 @@ Module-level doc comments carry the details; the README stays a map.
 ## Development
 
 With nix + direnv (recommended): `direnv allow` drops you into a shell
-with the Rust toolchain, `sqlx-cli`, `bats`, and postgres, and sets a
+with the Rust toolchain, `sqlx-cli`, and postgres, and sets a
 directory-scoped `DATABASE_URL`.
 
 ```sh
 ./dev/bin/pg-start.sh           # local postgres on :5441 + migrations (stop: pg-stop.sh)
                                 # PGPORT/PGDATABASE/PGDATA overridable for parallel clones
 SQLX_OFFLINE=true cargo test    # unit tests; DB-backed tests skip without DATABASE_URL
-bats bats/e2e.bats              # full e2e smoke: dedicated pg, migrations, fmt+clippy+tests
 
 cargo sqlx prepare --workspace  # regenerate .sqlx offline cache (needs running pg)
 ```
