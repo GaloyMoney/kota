@@ -53,6 +53,15 @@ pub enum PsbtSessionError {
         now: chrono::DateTime<chrono::Utc>,
     },
     #[error(
+        "PsbtSessionError - ExpiryTooFarOut: expires_at {expires_at} is beyond the maximum \
+         session lifetime (latest allowed: {max_expiry}); an unbounded collection window \
+         defeats the expiry policy"
+    )]
+    ExpiryTooFarOut {
+        expires_at: chrono::DateTime<chrono::Utc>,
+        max_expiry: chrono::DateTime<chrono::Utc>,
+    },
+    #[error(
         "PsbtSessionError - InvalidAddress: output address is not valid for {network}: {reason}"
     )]
     InvalidAddress {

@@ -175,7 +175,7 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
             &wallet,
             UserId::new(),
             spec,
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            DateTime::<Utc>::from_timestamp(1_900_604_800, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;
@@ -342,7 +342,7 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
                     derivation_index: 1,
                 }),
             },
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            DateTime::<Utc>::from_timestamp(1_900_604_800, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;
@@ -452,7 +452,7 @@ async fn jobs_for_ended_session_complete_as_noops() -> anyhow::Result<()> {
                 fee_sats: 500,
                 change_output: None,
             },
-            DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+            DateTime::<Utc>::from_timestamp(1_900_604_800, 0).unwrap(),
             DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
         )?)
         .await?;

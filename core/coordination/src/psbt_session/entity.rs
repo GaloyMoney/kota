@@ -548,6 +548,13 @@ pub const MAX_SPEND_INPUTS: usize = 100;
 /// top of this cap.
 pub const MAX_SPEND_OUTPUTS: usize = 100;
 
+/// Longest a proposal may stay open for signatures, counted from
+/// creation. Expiry is the platform's defense against fee-market drift
+/// and stale UTXO sets — a proposal with a years-long expiry would
+/// defeat it, so `expires_at` has a ceiling as well as a floor. 30
+/// days is generous for a human quorum to coordinate a spend.
+pub const MAX_SESSION_TTL: chrono::Duration = chrono::Duration::days(30);
+
 /// Dust threshold for the wallet's change outputs. Change is always
 /// P2WSH (derived from the `wsh(sortedmulti)` descriptor by the
 /// creation job), so the bound is computable at proposal time from a
@@ -691,6 +698,13 @@ impl NewPsbtSession {
         }
         if expires_at <= now {
             return Err(PsbtSessionError::ExpiryInPast { expires_at, now });
+        }
+        let max_expiry = now + MAX_SESSION_TTL;
+        if expires_at > max_expiry {
+            return Err(PsbtSessionError::ExpiryTooFarOut {
+                expires_at,
+                max_expiry,
+            });
         }
         debug_assert!(
             threshold > 0 && threshold as usize <= keystores.len(),
@@ -1410,6 +1424,22 @@ mod tests {
             propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::DustOutput { .. })
         ));
+    }
+
+    #[test]
+    fn expiry_beyond_ttl_ceiling_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
+        assert!(matches!(
+            propose(
+                &wallet,
+                sample_spend(),
+                now() + MAX_SESSION_TTL + chrono::Duration::seconds(1),
+                now(),
+            ),
+            Err(PsbtSessionError::ExpiryTooFarOut { .. })
+        ));
+        // exactly at the ceiling is allowed
+        assert!(propose(&wallet, sample_spend(), now() + MAX_SESSION_TTL, now(),).is_ok());
     }
 
     #[test]

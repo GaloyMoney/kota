@@ -81,7 +81,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
             fee_sats: 500,
             change_output: None,
         },
-        DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+        DateTime::<Utc>::from_timestamp(1_900_604_800, 0).unwrap(),
         DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
     )?;
 
