@@ -1,0 +1,8 @@
+mutation WalletCancel($input: WalletCancelInput!) {
+  walletCancel(input: $input) {
+    wallet {
+      walletId
+      status
+    }
+  }
+}

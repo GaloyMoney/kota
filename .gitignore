@@ -2,3 +2,4 @@
 .env
 .direnv/
 .nix-deps/
+/tmp/

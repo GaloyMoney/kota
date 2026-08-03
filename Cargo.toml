@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core/coordination", "kota/app"]
+members = ["core/coordination", "kota/app", "kota/server", "kota/cli"]
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [] }
@@ -35,3 +35,22 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 sha2 = "0.11"
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# async-graphql rc pin must stay unified with es-entity's optional
+# dependency (8.0.0-rc.5) so the `scalar!` impls it generates for the
+# entity ids apply to the same async-graphql version the server uses.
+async-graphql = { version = "8.0.0-rc.5", default-features = false }
+async-graphql-axum = "8.0.0-rc.5"
+axum = "0.8"
+tokio = { version = "1.52", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "time",
+    "net",
+    "sync",
+] }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+base64 = "0.22"

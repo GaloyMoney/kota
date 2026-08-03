@@ -312,6 +312,16 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         Ok(self.wallets.find_by_id(wallet_id).await?)
     }
 
+    /// `Ok(None)` when no wallet exists for `wallet_id` — the API
+    /// layer's `wallet(id)` query maps this to a nullable field.
+    #[instrument(name = "coordination.maybe_find_wallet", skip(self))]
+    pub async fn maybe_find_wallet(
+        &self,
+        wallet_id: WalletId,
+    ) -> Result<Option<Wallet>, CoordinationError> {
+        Ok(self.wallets.maybe_find_by_id(wallet_id).await?)
+    }
+
     /// Idempotent wallet import: look up a wallet by its content
     /// address (network + canonical descriptor).
     #[instrument(name = "coordination.find_wallet_by_fingerprint", skip(self))]
@@ -331,6 +341,16 @@ impl<B: BlobStore + Send + Sync + 'static> Coordination<B> {
         session_id: PsbtSessionId,
     ) -> Result<PsbtSession, CoordinationError> {
         Ok(self.sessions.find_by_id(session_id).await?)
+    }
+
+    /// `Ok(None)` when no session exists for `session_id` — the API
+    /// layer's `psbtSession(id)` query maps this to a nullable field.
+    #[instrument(name = "coordination.maybe_find_session", skip(self))]
+    pub async fn maybe_find_session(
+        &self,
+        session_id: PsbtSessionId,
+    ) -> Result<Option<PsbtSession>, CoordinationError> {
+        Ok(self.sessions.maybe_find_by_id(session_id).await?)
     }
 
     /// A UNIQUE fingerprint collision on update means another wallet

@@ -1,0 +1,16 @@
+query Wallet($id: WalletId!) {
+  wallet(id: $id) {
+    walletId
+    status
+    threshold
+    network
+    descriptor
+    descriptorFingerprint
+    participants
+    pendingParticipants
+    keystores {
+      userId
+      fingerprint
+    }
+  }
+}
