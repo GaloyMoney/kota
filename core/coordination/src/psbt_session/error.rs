@@ -54,6 +54,12 @@ pub enum PsbtSessionError {
         network: bitcoin::Network,
         reason: String,
     },
+    #[error(
+        "PsbtSessionError - DustOutput: {amount_sats} sats is below the {dust_sats}-sat dust \
+         limit for its output script; the transaction would finalize fine but never relay, \
+         stranding the session"
+    )]
+    DustOutput { amount_sats: u64, dust_sats: u64 },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,

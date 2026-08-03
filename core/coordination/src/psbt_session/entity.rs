@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use bitcoin::{BlockHash, Txid, bip32::Fingerprint as KeyFingerprint};
+use bitcoin::{
+    Amount, BlockHash, ScriptBuf, Txid, WScriptHash, bip32::Fingerprint as KeyFingerprint,
+};
 
 use crate::primitives::{PsbtHash, PsbtSessionId, UserId, WalletId};
 use crate::wallet::{Wallet, WalletStatus, keystore_fingerprint};
@@ -464,6 +466,16 @@ pub struct SpendSpec {
 /// and signers see the implied feerate on-device.
 pub const MAX_FEE_SATS: u64 = 1_000_000;
 
+/// Dust threshold for the wallet's change outputs. Change is always
+/// P2WSH (derived from the `wsh(sortedmulti)` descriptor by the
+/// creation job), so the bound is computable at proposal time from a
+/// representative script — dust depends only on the script's
+/// serialized size, not its content.
+fn p2wsh_dust_threshold() -> Amount {
+    use bitcoin::hashes::Hash;
+    ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array([0; 32])).minimal_non_dust()
+}
+
 #[derive(Debug, Builder)]
 pub struct NewPsbtSession {
     #[builder(setter(into))]
@@ -540,7 +552,7 @@ impl NewPsbtSession {
         // fail permanently on a session that can no longer be fixed.
         // (`build_unsigned_psbt` re-checks as defense-in-depth.)
         for output in &outputs {
-            output
+            let address = output
                 .address
                 .clone()
                 .require_network(wallet.network)
@@ -548,6 +560,31 @@ impl NewPsbtSession {
                     network: wallet.network,
                     reason: e.to_string(),
                 })?;
+            // A zero or sub-dust output makes the whole transaction
+            // non-standard: it would build and finalize fine and then
+            // never relay, stranding the session past finalization.
+            // The dust threshold is script-dependent and knowable at
+            // proposal time.
+            let dust = address.script_pubkey().minimal_non_dust();
+            if Amount::from_sat(output.amount_sats) < dust {
+                return Err(PsbtSessionError::DustOutput {
+                    amount_sats: output.amount_sats,
+                    dust_sats: dust.to_sat(),
+                });
+            }
+        }
+        // Change is always P2WSH (derived from the wsh(sortedmulti)
+        // descriptor by the creation job), so its dust bound is known
+        // here too — sub-dust change must be folded into the fee by the
+        // proposer, not emitted as an unspendable output.
+        if let Some(change) = &change_output {
+            let dust = p2wsh_dust_threshold();
+            if Amount::from_sat(change.amount_sats) < dust {
+                return Err(PsbtSessionError::DustOutput {
+                    amount_sats: change.amount_sats,
+                    dust_sats: dust.to_sat(),
+                });
+            }
         }
         if fee_sats > MAX_FEE_SATS {
             return Err(PsbtSessionError::FeeExceedsMax {
@@ -1085,6 +1122,32 @@ mod tests {
         assert!(matches!(
             propose(&wallet, spend),
             Err(PsbtSessionError::InvalidAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn dust_outputs_rejected() {
+        let wallet = active_wallet(2, &[1, 2]);
+
+        // zero- and sub-dust spend outputs
+        for amount_sats in [0, 100] {
+            let mut spend = sample_spend();
+            spend.outputs[0].amount_sats = amount_sats;
+            assert!(matches!(
+                propose(&wallet, spend),
+                Err(PsbtSessionError::DustOutput { .. })
+            ));
+        }
+
+        // sub-dust change should have been folded into the fee
+        let mut spend = sample_spend();
+        spend.change_output = Some(ChangeOutput {
+            amount_sats: 100,
+            derivation_index: 1,
+        });
+        assert!(matches!(
+            propose(&wallet, spend),
+            Err(PsbtSessionError::DustOutput { .. })
         ));
     }
 
