@@ -14,7 +14,7 @@ use bitcoin::Network;
 use crate::primitives::{PsbtHash, PsbtSessionId};
 use crate::psbt_session::{PsbtSessionRepo, PsbtSessionStatus, SpendSpec};
 use crate::storage::BlobStore;
-use crate::wallet::{WalletRepo, build_unsigned_psbt};
+use crate::wallet::{WalletError, WalletRepo, build_unsigned_psbt};
 
 use super::{FundingUtxoProvider, JobsError};
 
@@ -167,11 +167,25 @@ where
                 Ok(JobCompletion::Complete)
             }
             // The session moved on between spawn and execution (cancelled
-            // or expired while pending). It will never need a PSBT, so
+            // while pending). It will never need a PSBT, so
             // retrying is pointless — complete as a no-op instead of
             // poisoning the retry queue.
             Err(JobsError::UnexpectedStatus { status, .. }) => {
                 tracing::info!(%status, "session no longer pending, nothing to do");
+                Ok(JobCompletion::Complete)
+            }
+            // Deterministic build failures: the spend spec recorded in the
+            // event can never produce a valid PSBT, no matter how often the
+            // job retries. The session stays Pending until it is
+            // cancelled; retrying would just poison the queue. (Proposal
+            // validation rejects wrong-network addresses and unbalanced
+            // specs up front — these are the defense-in-depth remnants.)
+            // `MissingFunding` is deliberately *not* here: funding data can
+            // lag the chain, so a missing utxo may appear on retry.
+            Err(JobsError::Wallet(
+                e @ (WalletError::InvalidAddress(_) | WalletError::AmountMismatch { .. }),
+            )) => {
+                tracing::warn!(error = %e, "permanent psbt build failure, giving up");
                 Ok(JobCompletion::Complete)
             }
             Err(e) => Err(Box::new(e)),

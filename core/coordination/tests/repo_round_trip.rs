@@ -72,7 +72,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
                 vout: 0,
             }],
             outputs: vec![SpendOutput {
-                address: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+                address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
                     .parse()
                     .unwrap(),
                 amount_sats: 50_000,
