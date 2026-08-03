@@ -692,3 +692,48 @@ async fn oversized_psbt_is_rejected_before_deserialization() {
         Err(core_coordination::psbt::PsbtValidationError::TooLarge { .. })
     ));
 }
+
+#[tokio::test]
+async fn corrupted_merged_blob_fails_finalization_verification() {
+    use core_coordination::psbt::{PsbtValidationError, verify_merged_blob};
+
+    let fixture = Fixture::new();
+    let unsigned = build_unsigned_psbt(
+        &fixture.spec,
+        &fixture.descriptor,
+        &fixture.funding,
+        NETWORK,
+    )
+    .unwrap();
+
+    // an honestly produced merged blob passes re-verification
+    let mut signed = unsigned.clone();
+    signed.sign(&fixture.xpriv, &fixture.secp).unwrap();
+    let extracted = validate_signed_submission(&unsigned, &signed, &fixture.fingerprint).unwrap();
+    let merged = merge_partial_sigs(&unsigned, &extracted);
+    verify_merged_blob(&unsigned, &merged).unwrap();
+
+    // a blob whose signature bytes were flipped in storage: structurally
+    // intact, cryptographically wrong — finalize() would have accepted it
+    // and recorded an unbroadcastable tx as Finalized
+    let mut corrupted = merged.clone();
+    let (pk, sig) = corrupted.inputs[0].partial_sigs.iter().next().unwrap();
+    let (pk, mut sig) = (*pk, *sig);
+    sig.signature = fixture.secp.sign_ecdsa(
+        &Message::from_digest([9u8; 32]),
+        &fixture.xpriv.to_priv().inner,
+    );
+    corrupted.inputs[0].partial_sigs.insert(pk, sig);
+    assert!(matches!(
+        verify_merged_blob(&unsigned, &corrupted),
+        Err(PsbtValidationError::InvalidPartialSignature(0))
+    ));
+
+    // a blob whose underlying tx was swapped wholesale
+    let mut swapped = merged.clone();
+    swapped.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        verify_merged_blob(&unsigned, &swapped),
+        Err(PsbtValidationError::UnsignedTxModified)
+    ));
+}

@@ -47,6 +47,11 @@ pub enum WalletError {
         outputs_sats: u64,
         fee_sats: u64,
     },
+    #[error(
+        "WalletError - AmountOverflow: amount arithmetic overflowed u64 — output amounts in \
+         the spend spec are proposer-controlled and must never panic the creation job"
+    )]
+    AmountOverflow,
     #[error("WalletError - Psbt: {0}")]
     Psbt(String),
     #[error("WalletError - InvalidPolicy: threshold {threshold} of {total_keystores} keystores")]
@@ -177,7 +182,9 @@ pub fn build_unsigned_psbt(
             .iter()
             .find(|f| OutPoint::from(&f.outpoint) == outpoint)
             .ok_or(WalletError::MissingFunding(outpoint))?;
-        total_in += utxo.txout.value;
+        total_in = total_in
+            .checked_add(utxo.txout.value)
+            .ok_or(WalletError::AmountOverflow)?;
         tx_inputs.push(TxIn {
             previous_output: outpoint,
             // opt-in RBF: fee bumps are a first-class flow
@@ -196,7 +203,11 @@ pub fn build_unsigned_psbt(
             .clone()
             .require_network(network)
             .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
-        total_out += Amount::from_sat(output.amount_sats);
+        // proposer-controlled amounts: checked math — a u64::MAX-scale
+        // amount must be a validation error, not a job panic
+        total_out = total_out
+            .checked_add(Amount::from_sat(output.amount_sats))
+            .ok_or(WalletError::AmountOverflow)?;
         tx_outputs.push(TxOut {
             value: Amount::from_sat(output.amount_sats),
             script_pubkey: address.script_pubkey(),
@@ -214,7 +225,9 @@ pub fn build_unsigned_psbt(
         .map(|change| descriptor.at_derivation_index(change.derivation_index))
         .transpose()?;
     if let (Some(change), Some(change_desc)) = (&spend.change_output, &change_descriptor) {
-        total_out += Amount::from_sat(change.amount_sats);
+        total_out = total_out
+            .checked_add(Amount::from_sat(change.amount_sats))
+            .ok_or(WalletError::AmountOverflow)?;
         tx_outputs.push(TxOut {
             value: Amount::from_sat(change.amount_sats),
             script_pubkey: change_desc.script_pubkey(),
@@ -329,6 +342,41 @@ pub(crate) mod tests {
 
     fn two_of_three() -> Descriptor<DescriptorPublicKey> {
         sortedmulti_wsh_descriptor(2, vec![keystore(1), keystore(2), keystore(3)]).unwrap()
+    }
+
+    #[test]
+    fn absurd_output_amounts_error_instead_of_panicking() {
+        use bitcoin::hashes::Hash;
+
+        let descriptor = two_of_three();
+        let funding_script = descriptor.at_derivation_index(0).unwrap().script_pubkey();
+        let outpoint = OutPointRef {
+            txid: bitcoin::Txid::from_byte_array([9; 32]),
+            vout: 0,
+        };
+        let funding = vec![FundingUtxo {
+            outpoint: outpoint.clone(),
+            txout: TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: funding_script,
+            },
+            derivation_index: 0,
+        }];
+        let spec = SpendSpec {
+            inputs: vec![outpoint],
+            outputs: vec![crate::psbt_session::SpendOutput {
+                address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
+                    .parse()
+                    .unwrap(),
+                amount_sats: u64::MAX,
+            }],
+            fee_sats: 500,
+            change_output: None,
+        };
+        assert!(matches!(
+            build_unsigned_psbt(&spec, &descriptor, &funding, NETWORK),
+            Err(WalletError::AmountOverflow)
+        ));
     }
 
     #[test]
