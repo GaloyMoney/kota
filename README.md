@@ -13,20 +13,34 @@ event-sourced PSBT signing-session lifecycle.
 ### `core/coordination` crate
 
 - **`wallet` module** — the `Wallet` aggregate plus wallet-side bitcoin
-  logic (descriptor construction, PSBT building). Wallet identity is
-  two-layered: `WalletId` is a framework-internal UUID, while
-  `descriptor_fingerprint` is the deterministic content address
-  (SHA-256) of (network, canonical descriptor) — UNIQUE in the
-  database, so re-importing the same wallet is an idempotent find, and
-  any component can recompute it to prove it is operating on the same
-  wallet. Descriptors are canonicalized at construction
-  (`sortedmulti_wsh_descriptor` sorts keystores) so logically identical
-  wallets always fingerprint identically.
+  logic (descriptor construction, PSBT building). A wallet is *not* born
+  with its descriptor: `Initialized` registers only the policy — an
+  N-of-M `threshold` over a named set of `participants`, on a network —
+  and each participant then submits exactly one keystore
+  (`KeystoreAdded`). The aggregate enforces participant binding: a
+  non-participant cannot submit, resubmission of the identical key is
+  idempotent, a different key requires an explicit `KeystoreRemoved`
+  first (pre-activation replacement, e.g. a wrong xpub), and master
+  fingerprints must be distinct across participants. The final keystore
+  atomically derives the canonical `wsh(sortedmulti(NofM))` descriptor
+  (`Activated`). Until then the wallet is `CollectingKeystores` — no
+  address space, no spends. A wallet stuck collecting can be abandoned
+  (`Cancelled`, pre-activation only; terminal). Wallet identity is two-layered: `WalletId`
+  is a framework-internal UUID, while `descriptor_fingerprint` is the
+  deterministic content address (SHA-256) of (network, canonical
+  descriptor) — NULL until activation, UNIQUE thereafter, so two wallets
+  converging on the same descriptor collide at activation and the
+  use-case layer turns that into an idempotent find. Descriptors are
+  canonicalized at derivation (`sortedmulti_wsh_descriptor` sorts
+  keystores) so submission order never affects the fingerprint.
 - **`psbt_session` module** — the `PsbtSession` aggregate (`es-entity`):
   - Vocabulary follows Sparrow: a session belongs to a **Wallet** and
     snapshots the wallet's **Policy** (N-of-M `threshold` over
     `keystores`, identified by their master fingerprints) at creation.
-    Anyone in the wallet can propose a spend. Actor attribution is split
+    Proposal is gated on the wallet: `NewPsbtSession::try_new` takes
+    the `Wallet` aggregate and rejects anything that is not `Active`
+    (a wallet still collecting keystores, or a cancelled one, has no
+    descriptor and cannot spend). Anyone in the wallet can propose a spend. Actor attribution is split
     by evidence: `proposed_by` is a `UserId` (a platform-attributed
     business fact), while signatures are attributed to keystore
     fingerprints (independently verifiable against the stored PSBT
@@ -52,9 +66,10 @@ event-sourced PSBT signing-session lifecycle.
   - Collected ≠ used: over-signing is allowed while collecting; `Finalized`
     records exactly which `sigs_used` authorized the spend.
   - Per-signer idempotent signature upload (guard on signer fingerprint).
-  - Quorum validated at construction (`Policy`: threshold, keystore
-    fingerprints); session-level signature-collection deadline
-    (`expires_at`).
+  - Policy validity is guaranteed by construction: the snapshot is
+    derived from an `Active` wallet, whose own aggregate already
+    enforced quorum sanity. Session-level signature-collection
+    deadline (`expires_at`).
   - `EsRepo` with a strum↔VARCHAR sqlx shim for the status column.
 - **`psbt` module** — `validate_signed_submission`: verifies a
   signer-submitted PSBT is the original unsigned PSBT plus *only* additive
@@ -88,8 +103,9 @@ event-sourced PSBT signing-session lifecycle.
 
 ### Tests
 
-- 22 entity unit tests covering the state machine, idempotency guards,
-  quorum validation, and reorg handling — no DB needed.
+- 46 entity unit tests covering the wallet and session state machines,
+  idempotency guards, participant binding, keystore replacement, and
+  reorg handling — no DB needed.
 - 3 end-to-end cryptographic tests (`core/coordination/tests/e2e_signing.rs`)
   running the full flow with real keys: propose -> build unsigned PSBT
   from the spec -> store/fetch by content hash -> sign with a real

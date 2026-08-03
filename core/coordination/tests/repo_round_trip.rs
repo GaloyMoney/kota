@@ -4,18 +4,53 @@
 use core_coordination::{
     primitives::*,
     psbt_session::{
-        NewPsbtSession, OutPointRef, Policy, PsbtSessionRepo, PsbtSessionStatus, SpendOutput,
-        SpendSpec,
+        NewPsbtSession, OutPointRef, PsbtSessionRepo, PsbtSessionStatus, SpendOutput, SpendSpec,
     },
+    wallet::{NewWallet, Wallet, keystore_fingerprint},
 };
 
-use bitcoin::bip32::Fingerprint as KeyFingerprint;
+use bitcoin::Network;
+use bitcoin::bip32::{DerivationPath, Fingerprint as KeyFingerprint, Xpriv, Xpub};
 use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::Secp256k1;
 use chrono::{DateTime, Utc};
 use es_entity::clock::ClockHandle;
+use es_entity::{IntoEvents, TryFromEvents};
+use miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard};
+use std::str::FromStr;
+
+const NETWORK: Network = Network::Regtest;
+
+fn keystore(seed: u8) -> DescriptorPublicKey {
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(NETWORK, &[seed; 64]).unwrap();
+    let account_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+    let account_xpriv = xpriv.derive_priv(&secp, &account_path).unwrap();
+    DescriptorPublicKey::XPub(DescriptorXKey {
+        origin: Some((xpriv.fingerprint(&secp), account_path)),
+        xkey: Xpub::from_priv(&secp, &account_xpriv),
+        derivation_path: DerivationPath::from_str("m/0").unwrap(),
+        wildcard: Wildcard::Unhardened,
+    })
+}
 
 fn fp(byte: u8) -> KeyFingerprint {
-    KeyFingerprint::from([byte, byte, byte, byte])
+    keystore_fingerprint(&keystore(byte))
+}
+
+/// An in-memory active 2-of-3 wallet (seeds 1, 2, 3) to propose against.
+fn active_wallet() -> Wallet {
+    let participants: Vec<UserId> = (0..3).map(|_| UserId::new()).collect();
+    let mut wallet = Wallet::try_from_events(
+        NewWallet::new(WalletId::new(), NETWORK, 2, participants.clone())
+            .unwrap()
+            .into_events(),
+    )
+    .unwrap();
+    for (seed, participant) in [1u8, 2, 3].iter().zip(participants) {
+        let _ = wallet.add_keystore(keystore(*seed), participant).unwrap();
+    }
+    wallet
 }
 
 #[tokio::test]
@@ -30,7 +65,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
 
     let new_session = NewPsbtSession::try_new(
         PsbtSessionId::new(),
-        WalletId::new(),
+        &active_wallet(),
         UserId::new(),
         SpendSpec {
             inputs: vec![OutPointRef {
@@ -45,10 +80,6 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
             }],
             fee_sats: 500,
             change_output: None,
-        },
-        Policy {
-            threshold: 2,
-            keystores: vec![fp(1), fp(2), fp(3)],
         },
         DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
         DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),

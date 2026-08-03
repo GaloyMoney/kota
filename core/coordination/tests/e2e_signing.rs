@@ -14,12 +14,13 @@ use core_coordination::{
     primitives::*,
     psbt::{merge_partial_sigs, parse_psbt, validate_signed_submission},
     psbt_session::{
-        ChangeOutput, NewPsbtSession, OutPointRef, Policy, PsbtSession, PsbtSessionStatus,
-        SpendOutput, SpendSpec,
+        ChangeOutput, NewPsbtSession, OutPointRef, PsbtSession, PsbtSessionStatus, SpendOutput,
+        SpendSpec,
     },
     storage::{BlobStore, InMemoryBlobStore},
     wallet::{
-        FundingUtxo, build_unsigned_psbt, descriptor_fingerprints, sortedmulti_wsh_descriptor,
+        FundingUtxo, NewWallet, Wallet, build_unsigned_psbt, descriptor_fingerprints,
+        sortedmulti_wsh_descriptor,
     },
 };
 
@@ -42,6 +43,7 @@ const ACCOUNT_PATH: &str = "m/48'/0'/0'/2'";
 fn setup_wallet() -> (
     Secp256k1<secp256k1::All>,
     Xpriv,
+    DescriptorPublicKey,
     Descriptor<DescriptorPublicKey>,
     KeyFingerprint,
 ) {
@@ -59,9 +61,22 @@ fn setup_wallet() -> (
         derivation_path: DerivationPath::from_str("m/0").unwrap(),
         wildcard: Wildcard::Unhardened,
     });
-    let descriptor = sortedmulti_wsh_descriptor(1, vec![keystore]).unwrap();
+    let descriptor = sortedmulti_wsh_descriptor(1, vec![keystore.clone()]).unwrap();
 
-    (secp, xpriv, descriptor, master_fingerprint)
+    (secp, xpriv, keystore, descriptor, master_fingerprint)
+}
+
+/// A fully activated 1-of-1 wallet aggregate for the given keystore.
+fn active_wallet(keystore: DescriptorPublicKey) -> Wallet {
+    let participant = UserId::new();
+    let mut wallet = Wallet::try_from_events(
+        NewWallet::new(WalletId::new(), NETWORK, 1, vec![participant])
+            .unwrap()
+            .into_events(),
+    )
+    .unwrap();
+    let _ = wallet.add_keystore(keystore, participant).unwrap();
+    wallet
 }
 
 fn expires_at() -> DateTime<Utc> {
@@ -71,6 +86,7 @@ fn expires_at() -> DateTime<Utc> {
 struct Fixture {
     secp: Secp256k1<secp256k1::All>,
     xpriv: Xpriv,
+    wallet: Wallet,
     descriptor: Descriptor<DescriptorPublicKey>,
     fingerprint: KeyFingerprint,
     funding: Vec<FundingUtxo>,
@@ -79,7 +95,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let (secp, xpriv, descriptor, fingerprint) = setup_wallet();
+        let (secp, xpriv, keystore, descriptor, fingerprint) = setup_wallet();
+        let wallet = active_wallet(keystore);
+        assert_eq!(
+            wallet.descriptor(),
+            Some(&descriptor),
+            "the aggregate derives the same descriptor"
+        );
 
         // wallet UTXO at derivation index 0 (receive chain)
         let funding_script = descriptor.at_derivation_index(0).unwrap().script_pubkey();
@@ -124,6 +146,7 @@ impl Fixture {
         Self {
             secp,
             xpriv,
+            wallet,
             descriptor,
             fingerprint,
             funding,
@@ -134,13 +157,9 @@ impl Fixture {
     fn propose(&self) -> PsbtSession {
         let new_session = NewPsbtSession::try_new(
             PsbtSessionId::new(),
-            WalletId::new(),
+            &self.wallet,
             UserId::new(),
             self.spec.clone(),
-            Policy {
-                threshold: 1,
-                keystores: vec![self.fingerprint],
-            },
             expires_at(),
             expires_at() - chrono::Duration::days(7),
         )
@@ -387,7 +406,7 @@ async fn mismatched_funding_script_is_rejected() {
 
 #[tokio::test]
 async fn partial_multi_input_submission_is_rejected() {
-    let (secp, xpriv, descriptor, _) = setup_wallet();
+    let (secp, xpriv, _, descriptor, _) = setup_wallet();
 
     // two wallet UTXOs, at derivation indices 0 and 2
     let mk_funding = |seed: u8, index: u32, sats: u64| FundingUtxo {
