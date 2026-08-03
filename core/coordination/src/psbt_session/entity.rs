@@ -179,9 +179,13 @@ impl PsbtSession {
     /// builds the PSBT, uploads it to content-addressed storage, then
     /// calls this with the resulting hash. Transitions the session from
     /// Pending to Collecting — signatures are not accepted before this.
+    /// The expiry bound is enforced against the caller's clock, not just
+    /// by the (eventual) `expire` transition: a creation job that runs
+    /// after the collection window closed must not open it retroactively.
     pub fn record_psbt_created(
         &mut self,
         unsigned_psbt_hash: PsbtHash,
+        now: DateTime<Utc>,
     ) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -191,6 +195,12 @@ impl PsbtSession {
             return Err(PsbtSessionError::CannotAttachPsbt {
                 id: self.id,
                 status: self.status(),
+            });
+        }
+        if now >= self.expires_at {
+            return Err(PsbtSessionError::PastExpiry {
+                expires_at: self.expires_at,
+                now,
             });
         }
 
@@ -212,11 +222,19 @@ impl PsbtSession {
     /// signed) — the first upload per fingerprint is final, so a
     /// partially-signed PSBT must never be accepted.
     ///
-    /// Idempotent per signer: re-uploading after a crash/retry is a no-op.
+    /// Idempotent per signer: re-uploading after a crash/retry is a no-op,
+    /// even after the session has since expired (the guard runs before the
+    /// expiry check).
+    ///
+    /// The expiry bound is enforced against the caller's clock: without
+    /// this, a signature landing after `expires_at` but before the
+    /// platform recorded `Expired` would extend the collection window the
+    /// expiry policy exists to close.
     pub fn add_signature(
         &mut self,
         fingerprint: KeyFingerprint,
         signed_psbt_hash: PsbtHash,
+        now: DateTime<Utc>,
     ) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -224,6 +242,12 @@ impl PsbtSession {
         );
         if !self.is_collecting() {
             return Err(PsbtSessionError::NotCollecting(self.id));
+        }
+        if now >= self.expires_at {
+            return Err(PsbtSessionError::PastExpiry {
+                expires_at: self.expires_at,
+                now,
+            });
         }
         if !self.keystores.contains(&fingerprint) {
             return Err(PsbtSessionError::UnknownKeystore(fingerprint));
@@ -365,7 +389,12 @@ impl PsbtSession {
 
     /// PSBTs don't expire on-chain; expiry is a platform-level policy to
     /// bound how long a proposal can collect signatures (fee market drift,
-    /// UTXO availability).
+    /// UTXO availability). The bound is enforced on the signing path
+    /// itself (`record_psbt_created` / `add_signature` take the clock);
+    /// this transition only *records* that the platform observed it, so
+    /// that reads stop seeing a dead session as live. Finalization is
+    /// deliberately not gated: a quorum that completed in time has already
+    /// authorized the spend.
     pub fn expire(&mut self, now: DateTime<Utc>) -> Result<Idempotent<()>, PsbtSessionError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -740,14 +769,25 @@ mod tests {
     /// A session whose PSBT-creation job has run: Collecting.
     fn create_collecting_session() -> PsbtSession {
         let mut session = create_session();
-        let _ = session.record_psbt_created(unsigned_psbt_hash()).unwrap();
+        let _ = session
+            .record_psbt_created(unsigned_psbt_hash(), now())
+            .unwrap();
         session
     }
 
     fn add_sig(session: &mut PsbtSession, byte: u8) -> Result<Idempotent<()>, PsbtSessionError> {
+        add_sig_at(session, byte, now())
+    }
+
+    fn add_sig_at(
+        session: &mut PsbtSession,
+        byte: u8,
+        now: DateTime<Utc>,
+    ) -> Result<Idempotent<()>, PsbtSessionError> {
         session.add_signature(
             fp(byte),
             PsbtHash::digest_of(format!("signed-psbt-{byte}").as_bytes()),
+            now,
         )
     }
 
@@ -776,7 +816,7 @@ mod tests {
         let mut session = create_session();
         assert!(
             session
-                .record_psbt_created(unsigned_psbt_hash())
+                .record_psbt_created(unsigned_psbt_hash(), now())
                 .unwrap()
                 .did_execute()
         );
@@ -787,10 +827,12 @@ mod tests {
     #[test]
     fn psbt_created_is_idempotent() {
         let mut session = create_session();
-        let _ = session.record_psbt_created(unsigned_psbt_hash()).unwrap();
+        let _ = session
+            .record_psbt_created(unsigned_psbt_hash(), now())
+            .unwrap();
         assert!(
             session
-                .record_psbt_created(unsigned_psbt_hash())
+                .record_psbt_created(unsigned_psbt_hash(), now())
                 .unwrap()
                 .was_already_applied()
         );
@@ -810,7 +852,7 @@ mod tests {
         let mut session = create_session();
         let _ = session.cancel("gave up".to_string()).unwrap();
         assert!(matches!(
-            session.record_psbt_created(unsigned_psbt_hash()),
+            session.record_psbt_created(unsigned_psbt_hash(), now()),
             Err(PsbtSessionError::CannotAttachPsbt { .. })
         ));
     }
@@ -1019,6 +1061,45 @@ mod tests {
             session.invalidate(InvalidationReason::InputsSpentExternally),
             Err(PsbtSessionError::CannotInvalidate { .. })
         ));
+    }
+
+    #[test]
+    fn no_psbt_created_after_expiry_time() {
+        // the creation job lands after the collection window closed but
+        // before the platform recorded `Expired` — the clock, not the
+        // event, is the bound
+        let mut session = create_session();
+        assert!(matches!(
+            session.record_psbt_created(unsigned_psbt_hash(), expires_at()),
+            Err(PsbtSessionError::PastExpiry { .. })
+        ));
+        assert_eq!(session.status(), PsbtSessionStatus::Pending);
+    }
+
+    #[test]
+    fn no_signatures_after_expiry_time() {
+        // a signature landing after `expires_at` but before the `Expired`
+        // event is recorded must not extend the collection window
+        let mut session = create_collecting_session();
+        assert!(matches!(
+            add_sig_at(&mut session, 1, expires_at()),
+            Err(PsbtSessionError::PastExpiry { .. })
+        ));
+        assert_eq!(session.signature_count(), 0);
+    }
+
+    #[test]
+    fn signature_retry_after_expiry_time_is_still_idempotent() {
+        // a signature recorded *before* expiry, retried after: the
+        // idempotency guard runs before the clock check
+        let mut session = create_collecting_session();
+        assert!(add_sig(&mut session, 1).unwrap().did_execute());
+        assert!(
+            add_sig_at(&mut session, 1, expires_at())
+                .unwrap()
+                .was_already_applied()
+        );
+        assert_eq!(session.signature_count(), 1);
     }
 
     #[test]

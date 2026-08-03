@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use bitcoin::Network;
 
 use crate::primitives::{PsbtHash, PsbtSessionId};
-use crate::psbt_session::{PsbtSessionRepo, PsbtSessionStatus, SpendSpec};
+use crate::psbt_session::{PsbtSessionError, PsbtSessionRepo, PsbtSessionStatus, SpendSpec};
 use crate::storage::BlobStore;
 use crate::wallet::{WalletRepo, build_unsigned_psbt};
 
@@ -62,7 +62,7 @@ pub async fn run_psbt_creation(
     let psbt = build_unsigned_psbt(&spend, descriptor, &utxos, network)?;
 
     let hash = blobs.put(&psbt.serialize()).await;
-    let _ = session.record_psbt_created(hash)?;
+    let _ = session.record_psbt_created(hash, chrono::Utc::now())?;
     sessions.update(&mut session).await?;
     Ok(hash)
 }
@@ -172,6 +172,13 @@ where
             // poisoning the retry queue.
             Err(JobsError::UnexpectedStatus { status, .. }) => {
                 tracing::info!(%status, "session no longer pending, nothing to do");
+                Ok(JobCompletion::Complete)
+            }
+            // The job ran past the session's expiry: the collection window
+            // is closed (`add_signature` rejects every upload now), so a
+            // PSBT is useless — complete as a no-op.
+            Err(JobsError::Session(PsbtSessionError::PastExpiry { expires_at, .. })) => {
+                tracing::info!(%expires_at, "session past expiry, nothing to do");
                 Ok(JobCompletion::Complete)
             }
             Err(e) => Err(Box::new(e)),

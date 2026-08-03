@@ -75,6 +75,15 @@ pub enum PsbtSessionError {
     NotYetExpired {
         expires_at: chrono::DateTime<chrono::Utc>,
     },
+    #[error(
+        "PsbtSessionError - PastExpiry: session expired at {expires_at} (now {now}); \
+         no new PSBT or signature is accepted once the collection window has closed, \
+         even if the Expired event has not been recorded yet"
+    )]
+    PastExpiry {
+        expires_at: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    },
     #[error("PsbtSessionError - CannotCancel: session {id} is in status {status}")]
     CannotCancel {
         id: PsbtSessionId,

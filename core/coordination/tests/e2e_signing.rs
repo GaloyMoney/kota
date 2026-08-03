@@ -194,7 +194,7 @@ async fn e2e_propose_create_sign_finalize() {
     let unsigned_hash = store.put(&unsigned_psbt.serialize()).await;
     assert!(
         session
-            .record_psbt_created(unsigned_hash)
+            .record_psbt_created(unsigned_hash, Utc::now())
             .unwrap()
             .did_execute()
     );
@@ -254,7 +254,7 @@ async fn e2e_propose_create_sign_finalize() {
     let signed_hash = store.put(&merged_psbt.serialize()).await;
     assert!(
         session
-            .add_signature(fixture.fingerprint, signed_hash)
+            .add_signature(fixture.fingerprint, signed_hash, Utc::now())
             .unwrap()
             .did_execute()
     );

@@ -207,7 +207,7 @@ async fn jobs_drive_full_lifecycle() -> anyhow::Result<()> {
     let merged = merge_partial_sigs(&unsigned, &extracted);
     let merged_hash = blobs.put(&merged.serialize()).await;
     let mut session = sessions.find_by_id(session_id).await?;
-    let _ = session.add_signature(fingerprint, merged_hash)?;
+    let _ = session.add_signature(fingerprint, merged_hash, chrono::Utc::now())?;
     sessions.update(&mut session).await?;
 
     // --- finalization job ---
@@ -390,7 +390,7 @@ async fn executor_drives_creation_and_finalization() -> anyhow::Result<()> {
     let merged = merge_partial_sigs(&unsigned, &extracted);
     let merged_hash = blobs.put(&merged.serialize()).await;
     let mut session = sessions.find_by_id(session_id).await?;
-    let _ = session.add_signature(fingerprint, merged_hash)?;
+    let _ = session.add_signature(fingerprint, merged_hash, chrono::Utc::now())?;
     sessions.update(&mut session).await?;
 
     // spawn finalization; the executor runs it to completion

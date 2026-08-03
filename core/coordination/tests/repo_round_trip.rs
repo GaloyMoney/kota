@@ -90,14 +90,21 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
 
     // the async creation job runs: PSBT built, uploaded, hash recorded
     session
-        .record_psbt_created(PsbtHash::digest_of(b"unsigned-psbt"))?
+        .record_psbt_created(
+            PsbtHash::digest_of(b"unsigned-psbt"),
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        )?
         .unwrap();
     let persisted = repo.update(&mut session).await?;
     assert_eq!(persisted, 1, "one PsbtCreated event persisted");
     assert_eq!(session.status(), PsbtSessionStatus::Collecting);
 
     session
-        .add_signature(fp(1), PsbtHash::digest_of(b"signed-psbt-1"))?
+        .add_signature(
+            fp(1),
+            PsbtHash::digest_of(b"signed-psbt-1"),
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        )?
         .unwrap();
 
     let persisted = repo.update(&mut session).await?;
