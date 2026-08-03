@@ -534,6 +534,20 @@ pub struct SpendSpec {
 /// and signers see the implied feerate on-device.
 pub const MAX_FEE_SATS: u64 = 1_000_000;
 
+/// Hard caps on the size of a spend spec, in inputs/outputs.
+///
+/// The spec is recorded verbatim in the `Initialized` event and drives
+/// the creation job's work; a malicious or broken proposer submitting
+/// thousands of outpoints would bloat the event log and the job queue.
+/// `MAX_PSBT_BYTES` caps the *stored* PSBT documents — these caps bound
+/// the proposal itself. 100 inputs of a 15-of-15 P2WSH multisig is
+/// ~40k vB, still comfortably within the 100k-vB standardness limit.
+pub const MAX_SPEND_INPUTS: usize = 100;
+
+/// See [`MAX_SPEND_INPUTS`]. The change output (at most one) rides on
+/// top of this cap.
+pub const MAX_SPEND_OUTPUTS: usize = 100;
+
 /// Dust threshold for the wallet's change outputs. Change is always
 /// P2WSH (derived from the `wsh(sortedmulti)` descriptor by the
 /// creation job), so the bound is computable at proposal time from a
@@ -603,6 +617,12 @@ impl NewPsbtSession {
         if inputs.is_empty() {
             return Err(PsbtSessionError::EmptyInputs);
         }
+        if inputs.len() > MAX_SPEND_INPUTS {
+            return Err(PsbtSessionError::TooManyInputs {
+                count: inputs.len(),
+                max: MAX_SPEND_INPUTS,
+            });
+        }
         {
             let mut dedup = inputs.clone();
             dedup.sort();
@@ -616,6 +636,12 @@ impl NewPsbtSession {
         }
         if outputs.is_empty() {
             return Err(PsbtSessionError::EmptyOutputs);
+        }
+        if outputs.len() > MAX_SPEND_OUTPUTS {
+            return Err(PsbtSessionError::TooManyOutputs {
+                count: outputs.len(),
+                max: MAX_SPEND_OUTPUTS,
+            });
         }
         // The wallet's network is known at proposal time, so a
         // wrong-network destination is rejected here — not left for the
@@ -1331,6 +1357,32 @@ mod tests {
         assert!(matches!(
             propose(&wallet, spend, expires_at(), now()),
             Err(PsbtSessionError::InvalidAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn spend_size_caps_enforced() {
+        let wallet = active_wallet(2, &[1, 2]);
+
+        let mut spend = sample_spend();
+        spend.inputs = (0..MAX_SPEND_INPUTS + 1)
+            .map(|i| OutPointRef {
+                txid: dummy_txid(i as u8),
+                vout: 0,
+            })
+            .collect();
+        assert!(matches!(
+            propose(&wallet, spend, expires_at(), now()),
+            Err(PsbtSessionError::TooManyInputs { .. })
+        ));
+
+        let mut spend = sample_spend();
+        spend.outputs = (0..MAX_SPEND_OUTPUTS + 1)
+            .map(|_| sample_spend().outputs[0].clone())
+            .collect();
+        assert!(matches!(
+            propose(&wallet, spend, expires_at(), now()),
+            Err(PsbtSessionError::TooManyOutputs { .. })
         ));
     }
 
