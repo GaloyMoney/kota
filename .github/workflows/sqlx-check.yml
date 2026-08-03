@@ -1,0 +1,41 @@
+name: sqlx-check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlx-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Regenerate .sqlx from scratch
+        run: |
+          # pg-start.sh: initdb + start postgres + createdb + sqlx migrate run,
+          # all from the flake — same versions as local dev.
+          # Start from an empty cache so stale tracked query files are
+          # detected as deletions instead of being silently preserved.
+          nix develop -c bash -c './dev/bin/pg-start.sh && rm -rf .sqlx && cargo sqlx prepare --workspace'
+
+      - name: Check .sqlx is up to date
+        run: |
+          # Only check tracked files for modifications or deletions.
+          # Missing .sqlx files for new queries are caught by SQLX_OFFLINE=true
+          # builds in the rust workflow.
+          if ! git diff --quiet .sqlx || [ -n "$(git ls-files --deleted .sqlx)" ]; then
+            echo "::error::.sqlx is out of date. Run './dev/bin/pg-start.sh && cargo sqlx prepare --workspace' and commit the changes."
+            git diff --stat .sqlx
+            git diff .sqlx
+            git ls-files --deleted .sqlx
+            exit 1
+          fi

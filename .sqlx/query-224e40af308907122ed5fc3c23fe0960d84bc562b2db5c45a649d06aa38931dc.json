@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO core_psbt_sessions (id, wallet_id, status, created_at) VALUES ($1, $2, $3, COALESCE($4, NOW()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "224e40af308907122ed5fc3c23fe0960d84bc562b2db5c45a649d06aa38931dc"
+}

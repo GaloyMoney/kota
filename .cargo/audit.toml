@@ -1,0 +1,15 @@
+# cargo-audit configuration.
+#
+# Ignored advisories require a justification and a re-evaluation trigger;
+# keep this list empty if at all possible.
+[advisories]
+ignore = [
+    # rsa 0.9.10 — Marvin Attack timing sidechannel (no upstream fix).
+    # The `rsa` crate appears in Cargo.lock only because lockfile v4 records
+    # optional dependencies feature-independently: sqlx-mysql is an optional,
+    # *disabled* feature of sqlx (this workspace and es-entity enable
+    # postgres only). `cargo tree -i rsa --target all` confirms rsa is never
+    # compiled. Even if it were, this platform holds no RSA keys and never
+    # performs RSA operations. Revisit if a MySQL feature is ever enabled.
+    "RUSTSEC-2023-0071",
+]

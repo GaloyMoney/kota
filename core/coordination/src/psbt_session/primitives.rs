@@ -1,0 +1,114 @@
+use bitcoin::{Txid, bip32::Fingerprint as KeyFingerprint};
+use serde::{Deserialize, Serialize};
+use strum::{AsRefStr, Display, EnumString};
+
+use crate::primitives::{BitcoinAddress, PsbtHash};
+
+/// Lifecycle status, derived by folding the event stream.
+///
+/// Note the two causality streams feeding this machine:
+/// - user commands: Proposed/SignatureAdded/Finalized/Cancelled
+/// - chain sync (via outbox consumer): BroadcastSeen/Confirmed/Invalidated
+///
+/// Chain-observed states are reversible (reorgs), so "latest lifecycle
+/// event wins" when folding — `Confirmed` can be followed by `Invalidated`
+/// and then by a new `Confirmed`.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    Display,
+    EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum PsbtSessionStatus {
+    /// Proposed; the async PSBT-creation job has not run yet.
+    #[default]
+    Pending,
+    /// PSBT created and uploaded; collecting signatures.
+    Collecting,
+    Finalized,
+    Broadcast,
+    Confirmed,
+    Invalidated,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidationReason {
+    /// A reorg unwound a previously observed confirmation.
+    Reorged,
+    /// One or more inputs were spent by a different transaction
+    /// (competing proposal, external sweep). The PSBT can never confirm.
+    InputsSpentExternally,
+    /// A fee-bumped replacement of this proposal was broadcast instead.
+    ReplacedByFeeBump,
+    /// Dropped from the mempool (e.g. fee below minimum after eviction).
+    MempoolEvicted,
+}
+
+/// An outpoint consumed by the spend (txid:vout). Immutable once the
+/// session is proposed — it's part of the unsigned tx the PSBT-creation
+/// job builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutPointRef {
+    pub txid: Txid,
+    pub vout: u32,
+}
+
+/// A destination of the spend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendOutput {
+    /// Destination address. Syntactic validity is enforced by the type
+    /// (parse at the boundary); network validation happens at the
+    /// wallet layer, where the instance's network is known.
+    pub address: BitcoinAddress,
+    pub amount_sats: u64,
+}
+
+/// Change returned to the wallet itself.
+///
+/// The address is deliberately *not* part of the spec: the PSBT-creation
+/// job derives it from the wallet descriptor at `derivation_index`, so a
+/// compromised caller cannot redirect the unspent remainder of the
+/// inputs. Signing devices cannot be relied on for this check — many
+/// hardware wallets lack the storage to keep a registered multisig
+/// policy on-device and therefore cannot verify change independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutput {
+    pub amount_sats: u64,
+    /// Derivation index on the wallet descriptor (change branch).
+    pub derivation_index: u32,
+}
+
+/// A collected signature: who signed, and where the signed PSBT blob lives.
+///
+/// Collected is not the same as *used*: more signatures than the threshold
+/// may be collected (concurrent uploads); `FinalizationRecord::sigs_used`
+/// records exactly which signatures ended up in the final transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureRecord {
+    pub fingerprint: KeyFingerprint,
+    pub signed_psbt_hash: PsbtHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizationRecord {
+    pub txid: Txid,
+    pub final_tx_hash: PsbtHash,
+    pub sigs_used: Vec<KeyFingerprint>,
+}

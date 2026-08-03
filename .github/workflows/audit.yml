@@ -1,0 +1,31 @@
+name: audit
+
+# cargo audit against the RustSec advisory database. Runs on every
+# push/PR touching dependency manifests, plus weekly so that newly
+# published advisories flag already-merged code (dependabot covers
+# version bumps; audit covers known-vulnerable pinned versions).
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml, Cargo.lock, "**/Cargo.toml", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: [Cargo.toml, Cargo.lock, "**/Cargo.toml", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+  # rustsec/audit-check publishes its report as a check run
+  checks: write
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Audit Cargo.lock for known vulnerabilities
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
