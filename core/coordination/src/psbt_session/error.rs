@@ -47,6 +47,13 @@ pub enum PsbtSessionError {
          cap of {max_sats} sats"
     )]
     FeeExceedsMax { fee_sats: u64, max_sats: u64 },
+    #[error(
+        "PsbtSessionError - InvalidAddress: output address is not valid for {network}: {reason}"
+    )]
+    InvalidAddress {
+        network: bitcoin::Network,
+        reason: String,
+    },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,
