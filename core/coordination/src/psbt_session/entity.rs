@@ -386,6 +386,81 @@ impl PsbtSession {
         });
         Ok(Idempotent::Executed(()))
     }
+
+    /// Re-assert the construction invariants on a hydrated entity.
+    ///
+    /// Every mutating method validates before pushing events, so a
+    /// well-formed stream always satisfies these — but hydration reads
+    /// *persisted* bytes, and a corrupted or hand-edited stream would
+    /// otherwise produce an entity whose methods misbehave silently
+    /// (a threshold above the keystore count can never be met; a
+    /// signature from outside the policy would count toward it).
+    /// Fail loudly at load instead. `EventDeserialization` is the
+    /// closest honest error: the persisted representation is invalid.
+    fn verify_hydrated_invariants(&self) -> Result<(), EntityHydrationError> {
+        use serde::de::Error as _;
+        fn violation(msg: String) -> EntityHydrationError {
+            EntityHydrationError::EventDeserialization(serde_json::Error::custom(format!(
+                "psbt session invariant violated: {msg}"
+            )))
+        }
+
+        if self.threshold == 0 || self.threshold as usize > self.keystores.len() {
+            return Err(violation(format!(
+                "policy {}-of-{} is out of range",
+                self.threshold,
+                self.keystores.len()
+            )));
+        }
+        {
+            let mut dedup = self.keystores.clone();
+            dedup.sort();
+            dedup.dedup();
+            if dedup.len() != self.keystores.len() {
+                return Err(violation("duplicate keystore in policy".to_string()));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for sig in &self.signatures {
+            if !self.keystores.contains(&sig.fingerprint) {
+                return Err(violation(format!(
+                    "recorded signature from {} is not part of the policy",
+                    sig.fingerprint
+                )));
+            }
+            if !seen.insert(sig.fingerprint) {
+                return Err(violation(format!(
+                    "duplicate recorded signature from {}",
+                    sig.fingerprint
+                )));
+            }
+        }
+        if let Some(finalization) = &self.finalization {
+            if finalization.sigs_used.len() < self.threshold as usize {
+                return Err(violation(format!(
+                    "finalized below threshold ({} of {})",
+                    finalization.sigs_used.len(),
+                    self.threshold
+                )));
+            }
+            let mut dedup = finalization.sigs_used.clone();
+            dedup.sort();
+            dedup.dedup();
+            if dedup.len() != finalization.sigs_used.len() {
+                return Err(violation("duplicate keystore in sigs_used".to_string()));
+            }
+            if !finalization
+                .sigs_used
+                .iter()
+                .all(|fp| self.signatures.iter().any(|s| s.fingerprint == *fp))
+            {
+                return Err(violation(
+                    "sigs_used is not a subset of collected signatures".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
@@ -447,7 +522,9 @@ impl TryFromEvents<PsbtSessionEvent> for PsbtSession {
                 | PsbtSessionEvent::Cancelled { .. } => {}
             }
         }
-        builder.signatures(signatures).events(events).build()
+        let entity = builder.signatures(signatures).events(events).build()?;
+        entity.verify_hydrated_invariants()?;
+        Ok(entity)
     }
 }
 
@@ -1164,6 +1241,65 @@ mod tests {
             propose(&wallet, spend),
             Err(PsbtSessionError::InvalidAddress { .. })
         ));
+    }
+
+    #[test]
+    fn hydration_rejects_out_of_range_policy() {
+        // a stream that could never have been produced via try_new:
+        // threshold above the snapshotted keystore set
+        let wallet = active_wallet(2, &[1, 2, 3]);
+        let spend = sample_spend();
+        let events = EntityEvents::init(
+            PsbtSessionId::new(),
+            [PsbtSessionEvent::Initialized {
+                id: PsbtSessionId::new(),
+                wallet_id: wallet.id,
+                proposed_by: UserId::new(),
+                inputs: spend.inputs,
+                outputs: spend.outputs,
+                fee_sats: spend.fee_sats,
+                change_output: spend.change_output,
+                threshold: 5,
+                keystores: vec![fp(1), fp(2), fp(3)],
+            }],
+        );
+        assert!(PsbtSession::try_from_events(events).is_err());
+    }
+
+    #[test]
+    fn hydration_rejects_signature_from_unknown_keystore() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        // an event the entity would never have accepted (fp(42) is not
+        // in the policy), injected straight into the persisted stream
+        session.events.push(PsbtSessionEvent::SignatureAdded {
+            fingerprint: fp(42),
+            signed_psbt_hash: PsbtHash::digest_of(b"bogus"),
+        });
+        assert!(PsbtSession::try_from_events(session.events.clone()).is_err());
+    }
+
+    #[test]
+    fn hydration_rejects_finalized_with_uncollected_sigs() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        session.events.push(PsbtSessionEvent::Finalized {
+            txid: dummy_txid(1),
+            final_tx_hash: PsbtHash::digest_of(b"final-tx"),
+            sigs_used: vec![fp(1), fp(2)],
+        });
+        assert!(PsbtSession::try_from_events(session.events.clone()).is_err());
+    }
+
+    #[test]
+    fn hydration_accepts_well_formed_stream() {
+        let mut session = create_collecting_session();
+        let _ = add_sig(&mut session, 1).unwrap();
+        let _ = add_sig(&mut session, 2).unwrap();
+        finalize(&mut session, vec![fp(1), fp(2)]);
+        let hydrated = PsbtSession::try_from_events(session.events.clone()).unwrap();
+        assert_eq!(hydrated.status(), PsbtSessionStatus::Finalized);
+        assert_eq!(hydrated.signature_count(), 2);
     }
 
     #[test]
