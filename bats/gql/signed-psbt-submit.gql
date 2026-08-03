@@ -1,0 +1,10 @@
+mutation SignedPsbtSubmit($input: SignedPsbtSubmitInput!) {
+  signedPsbtSubmit(input: $input) {
+    psbtSession {
+      psbtSessionId
+      status
+      signatureCount
+      thresholdMet
+    }
+  }
+}

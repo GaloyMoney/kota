@@ -1,0 +1,25 @@
+[package]
+name = "kota-cli"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kota-cli"
+path = "src/main.rs"
+
+[dependencies]
+kota-app = { path = "../app" }
+kota-server = { path = "../server" }
+core-coordination = { path = "../../core/coordination" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+sqlx.workspace = true
+job.workspace = true
+bitcoin.workspace = true
+miniscript.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

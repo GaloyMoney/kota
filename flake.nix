@@ -39,6 +39,8 @@
             cargo-watch
             postgresql_18
             jq
+            bats
+            curl
             alejandra
           ];
 

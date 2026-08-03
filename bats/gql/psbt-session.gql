@@ -1,0 +1,22 @@
+query PsbtSession($id: PsbtSessionId!) {
+  psbtSession(id: $id) {
+    psbtSessionId
+    walletId
+    status
+    threshold
+    signatureCount
+    thresholdMet
+    unsignedPsbtHash
+    unsignedPsbt
+    signatures {
+      fingerprint
+      signedPsbtHash
+    }
+    missingKeystores
+    finalization {
+      txid
+      finalTxHash
+      sigsUsed
+    }
+  }
+}

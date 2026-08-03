@@ -1,0 +1,23 @@
+mutation SpendPropose($input: SpendProposeInput!) {
+  spendPropose(input: $input) {
+    psbtSession {
+      psbtSessionId
+      walletId
+      proposedBy
+      status
+      threshold
+      signatureCount
+      thresholdMet
+      unsignedPsbt
+      inputs {
+        txid
+        vout
+      }
+      outputs {
+        address
+        amountSats
+      }
+      feeSats
+    }
+  }
+}

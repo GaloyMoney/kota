@@ -1,0 +1,6 @@
+query WalletByDescriptorFingerprint($fingerprint: String!) {
+  walletByDescriptorFingerprint(fingerprint: $fingerprint) {
+    walletId
+    status
+  }
+}

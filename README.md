@@ -28,8 +28,29 @@ application side.
 
 The use-case layer (`Coordination` service, lana pattern): commands that
 drive the aggregates, spawn the jobs, and enforce the bindings the
-aggregates defer (signer ↔ keystore, idempotent wallet import). Sibling
-crates to come: `kota/server` (API), `kota/cli`.
+aggregates defer (signer ↔ keystore, idempotent wallet import).
+
+## `kota/server` — the GraphQL API
+
+async-graphql/axum over the use-case layer, following lana's
+`admin-server` pattern at kota's scale: one graphql module per domain
+(`wallet`, `psbt_session`), `Query`/`Mutation` roots in
+`graphql::schema`, `XxxInput`/`XxxPayload` mutation conventions, and a
+`/health` endpoint. The acting user arrives as an `x-user-id` header —
+a dev stand-in for upstream auth until a user/auth crate lands (lana
+resolves the subject from a JWT). The blob store is type-erased
+(`DynBlobStore`) so the schema has a concrete app type while the binary
+picks the backend.
+
+## `kota/cli` — the binary
+
+`kota-cli run` migrates the database, wires the app layer, starts the
+job poller, and serves the API (env: `DATABASE_URL`,
+`KOTA_SERVER_PORT`, `KOTA_NETWORK`). The blob store is in-memory and
+the funding-UTXO provider is unconfigured (chain sync not built yet),
+so proposed spends stay `Pending` — PSBT creation and finalization
+come with their backends. `kota-cli dev gen-keystore` prints a
+deterministic test keystore for the e2e tests.
 
 Module-level doc comments carry the details; the README stays a map.
 
@@ -50,6 +71,9 @@ directory-scoped `DATABASE_URL`.
 ./dev/bin/pg-start.sh           # local postgres on :5441 + migrations (stop: pg-stop.sh)
                                 # PGPORT/PGDATABASE/PGDATA overridable for parallel clones
 SQLX_OFFLINE=true cargo test    # unit tests; DB-backed tests skip without DATABASE_URL
+cargo run -p kota-cli -- run    # serve GraphQL on :5256 (KOTA_SERVER_PORT/KOTA_NETWORK)
+bats bats/                      # e2e tests: starts pg + the server if needed, then drives
+                                # the wallet/spend flows over HTTP (needs bats, jq, curl)
 
 cargo sqlx prepare --workspace  # regenerate .sqlx offline cache (needs running pg)
 ```

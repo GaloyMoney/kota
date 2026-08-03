@@ -1,0 +1,12 @@
+mutation WalletRegister($input: WalletRegisterInput!) {
+  walletRegister(input: $input) {
+    wallet {
+      walletId
+      status
+      threshold
+      network
+      participants
+      pendingParticipants
+    }
+  }
+}
