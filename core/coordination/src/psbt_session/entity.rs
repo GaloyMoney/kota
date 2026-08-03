@@ -500,6 +500,17 @@ pub struct SpendSpec {
     pub change_output: Option<ChangeOutput>,
 }
 
+/// Hard cap on the fee a proposal may declare, in sats (0.01 BTC).
+///
+/// Signers verify the spend on their hardware wallets, but a
+/// fat-fingered or malicious proposer (anyone in the wallet can
+/// propose) should not be able to put an absurd fee in front of the
+/// quorum at all. Absolute cap rather than a feerate: the proposal
+/// layer does not know input amounts or tx vsize — the PSBT-creation
+/// job additionally enforces exact balance (inputs == outputs + fee),
+/// and signers see the implied feerate on-device.
+pub const MAX_FEE_SATS: u64 = 1_000_000;
+
 #[derive(Debug, Builder)]
 pub struct NewPsbtSession {
     #[builder(setter(into))]
@@ -527,6 +538,7 @@ impl NewPsbtSession {
         spend: SpendSpec,
         policy: Policy,
         expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Result<Self, PsbtSessionError> {
         let SpendSpec {
             inputs,
@@ -537,8 +549,28 @@ impl NewPsbtSession {
         if inputs.is_empty() {
             return Err(PsbtSessionError::EmptyInputs);
         }
+        {
+            let mut dedup = inputs.clone();
+            dedup.sort();
+            let window = dedup.windows(2).find(|w| w[0] == w[1]);
+            if let Some(w) = window {
+                return Err(PsbtSessionError::DuplicateInput {
+                    txid: w[0].txid,
+                    vout: w[0].vout,
+                });
+            }
+        }
         if outputs.is_empty() {
             return Err(PsbtSessionError::EmptyOutputs);
+        }
+        if fee_sats > MAX_FEE_SATS {
+            return Err(PsbtSessionError::FeeExceedsMax {
+                fee_sats,
+                max_sats: MAX_FEE_SATS,
+            });
+        }
+        if expires_at <= now {
+            return Err(PsbtSessionError::ExpiryInPast { expires_at, now });
         }
         let Policy {
             threshold,
@@ -623,6 +655,10 @@ mod tests {
         DateTime::from_timestamp(2_000_000_000, 0).unwrap()
     }
 
+    fn now() -> DateTime<Utc> {
+        expires_at() - chrono::Duration::days(7)
+    }
+
     fn sample_spend() -> SpendSpec {
         SpendSpec {
             inputs: vec![OutPointRef {
@@ -658,6 +694,7 @@ mod tests {
                 keystores: signers,
             },
             expires_at(),
+            now(),
         )
         .unwrap()
     }
@@ -1038,6 +1075,7 @@ mod tests {
                 sample_spend(),
                 policy(0, signers.clone()),
                 expires_at(),
+                now(),
             ),
             Err(PsbtSessionError::InvalidPolicy { .. })
         ));
@@ -1049,6 +1087,7 @@ mod tests {
                 sample_spend(),
                 policy(3, signers),
                 expires_at(),
+                now(),
             ),
             Err(PsbtSessionError::InvalidPolicy { .. })
         ));
@@ -1060,8 +1099,88 @@ mod tests {
                 sample_spend(),
                 policy(1, vec![fp(1), fp(1)]),
                 expires_at(),
+                now(),
             ),
             Err(PsbtSessionError::DuplicateKeystore)
+        ));
+    }
+
+    #[test]
+    fn duplicate_inputs_rejected() {
+        let mut spend = sample_spend();
+        let dup = spend.inputs[0].clone();
+        spend.inputs.push(dup.clone());
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                spend,
+                Policy {
+                    threshold: 2,
+                    keystores: vec![fp(1), fp(2)],
+                },
+                expires_at(),
+                now(),
+            ),
+            Err(PsbtSessionError::DuplicateInput { txid, vout }) if txid == dup.txid && vout == dup.vout
+        ));
+    }
+
+    #[test]
+    fn fee_above_cap_rejected() {
+        let mut spend = sample_spend();
+        spend.fee_sats = MAX_FEE_SATS + 1;
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                spend,
+                Policy {
+                    threshold: 2,
+                    keystores: vec![fp(1), fp(2)],
+                },
+                expires_at(),
+                now(),
+            ),
+            Err(PsbtSessionError::FeeExceedsMax { .. })
+        ));
+    }
+
+    #[test]
+    fn expiry_in_past_rejected() {
+        // equal to now
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                sample_spend(),
+                Policy {
+                    threshold: 2,
+                    keystores: vec![fp(1), fp(2)],
+                },
+                now(),
+                now(),
+            ),
+            Err(PsbtSessionError::ExpiryInPast { .. })
+        ));
+        // before now
+        assert!(matches!(
+            NewPsbtSession::try_new(
+                PsbtSessionId::new(),
+                WalletId::new(),
+                UserId::new(),
+                sample_spend(),
+                Policy {
+                    threshold: 2,
+                    keystores: vec![fp(1), fp(2)],
+                },
+                now() - chrono::Duration::seconds(1),
+                now(),
+            ),
+            Err(PsbtSessionError::ExpiryInPast { .. })
         ));
     }
 
@@ -1083,6 +1202,7 @@ mod tests {
                 spend,
                 policy.clone(),
                 expires_at(),
+                now(),
             ),
             Err(PsbtSessionError::EmptyInputs)
         ));
@@ -1097,6 +1217,7 @@ mod tests {
                 spend,
                 policy,
                 expires_at(),
+                now(),
             ),
             Err(PsbtSessionError::EmptyOutputs)
         ));

@@ -51,6 +51,7 @@ async fn create_and_update_round_trip() -> anyhow::Result<()> {
             keystores: vec![fp(1), fp(2), fp(3)],
         },
         DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap(),
+        DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
     )?;
 
     let mut session = repo.create(new_session).await?;

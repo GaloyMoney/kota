@@ -27,6 +27,8 @@ use miniscript::psbt::PsbtExt;
 pub enum PsbtValidationError {
     #[error("psbt deserialization failed: {0}")]
     Deserialize(String),
+    #[error("psbt document is {size} bytes, exceeding the {max}-byte cap")]
+    TooLarge { size: usize, max: usize },
     #[error("unsigned transaction was modified")]
     UnsignedTxModified,
     #[error("input/output count mismatch with original psbt")]
@@ -75,7 +77,22 @@ pub enum PsbtValidationError {
     OutputFieldModified(usize),
 }
 
+/// Hard cap on accepted PSBT documents, in bytes (1 MiB).
+///
+/// Signer submissions are attacker-controlled bytes that get deserialized
+/// and stored in content-addressed storage before any validation can run.
+/// A cap keeps a hostile uploader from causing memory/CPU and storage
+/// exhaustion. 1 MiB is generous: even a 100-input 15-of-15 P2WSH PSBT
+/// with full key sources and partial signatures is ~250 KiB.
+pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
+
 pub fn parse_psbt(bytes: &[u8]) -> Result<Psbt, PsbtValidationError> {
+    if bytes.len() > MAX_PSBT_BYTES {
+        return Err(PsbtValidationError::TooLarge {
+            size: bytes.len(),
+            max: MAX_PSBT_BYTES,
+        });
+    }
     Psbt::deserialize(bytes).map_err(|e| PsbtValidationError::Deserialize(e.to_string()))
 }
 

@@ -32,6 +32,21 @@ pub enum PsbtSessionError {
     EmptyInputs,
     #[error("PsbtSessionError - EmptyOutputs: a spend must have at least one output")]
     EmptyOutputs,
+    #[error(
+        "PsbtSessionError - DuplicateInput: outpoint {txid}:{vout} appears more than once; \
+         the resulting transaction would be invalid (double-spend within the tx)"
+    )]
+    DuplicateInput { txid: bitcoin::Txid, vout: u32 },
+    #[error(
+        "PsbtSessionError - FeeExceedsMax: proposed fee {fee_sats} sats exceeds the platform \
+         cap of {max_sats} sats"
+    )]
+    FeeExceedsMax { fee_sats: u64, max_sats: u64 },
+    #[error("PsbtSessionError - ExpiryInPast: expires_at {expires_at} is not after now ({now})")]
+    ExpiryInPast {
+        expires_at: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    },
     #[error("PsbtSessionError - CannotAttachPsbt: session {id} is in status {status}")]
     CannotAttachPsbt {
         id: PsbtSessionId,
