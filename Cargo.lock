@@ -62,9 +62,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.91"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -318,7 +318,7 @@ dependencies = [
  "bitcoin",
  "chrono",
  "derive_builder",
- "es-entity",
+ "es-entity 0.11.11",
  "job",
  "miniscript",
  "serde",
@@ -426,6 +426,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+dependencies = [
+ "darling_core 0.24.1",
+ "darling_macro 0.24.1",
+]
+
+[[package]]
 name = "darling_core"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -453,6 +463,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -472,6 +495,17 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+dependencies = [
+ "darling_core 0.24.1",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -595,7 +629,34 @@ dependencies = [
  "async-stream",
  "chrono",
  "derive_builder",
- "es-entity-macros",
+ "es-entity-macros 0.11.11",
+ "futures-core",
+ "futures-util",
+ "im",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+]
+
+[[package]]
+name = "es-entity"
+version = "0.12.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08dbbbf5a5efccc53806ea8a80abd3db1d222cacfe7d2b26d72b4955d6616464"
+dependencies = [
+ "async-stream",
+ "chrono",
+ "derive_builder",
+ "es-entity-macros 0.12.12",
  "futures-core",
  "futures-util",
  "im",
@@ -626,6 +687,22 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "es-entity-macros"
+version = "0.12.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20260b2bfe72d7dec3bf2a55c7d0ba1af3ee502cff8759eecee811c8289b9bc7"
+dependencies = [
+ "convert_case",
+ "darling 0.24.1",
+ "pluralizer",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "sqlparser",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1114,14 +1191,14 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "job"
-version = "0.6.37"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36faed9d18e42d25fa3f22aa3831f1d599a54a71e6be6bacbb2d39fd944fb921"
+checksum = "3083523d28127213aad09e26cf4d9ab78f60bd4647bf3472c25f9f193910e4e8"
 dependencies = [
  "async-trait",
  "chrono",
  "derive_builder",
- "es-entity",
+ "es-entity 0.12.12",
  "futures",
  "rand 0.10.2",
  "serde",
@@ -1153,7 +1230,7 @@ dependencies = [
  "bitcoin",
  "chrono",
  "core-coordination",
- "es-entity",
+ "es-entity 0.11.11",
  "job",
  "miniscript",
  "sqlx",
@@ -2010,6 +2087,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlparser"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "sqlx"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2292,18 +2378,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2534,9 +2620,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
